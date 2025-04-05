@@ -1,0 +1,55 @@
++-------------------------------+
+| ESP32/ESP8266 Fingerprint Circuit |
++-------------------------------+
+
++-------------+           +---------------+
+| ESP32/8266  |           |  Fingerprint  |
+|             |           |    Sensor     |
+|         TX0 |---------->| RX            |
+|         RX0 |<----------| TX            |
+|         3.3V|---------->| VCC           |
+|         GND |---------->| GND           |
++-------------+           +---------------+
+
++-------------+           +---------------+
+| ESP32/8266  |           |   16x2 LCD    |
+|             |           |   (I2C)       |
+|         SDA |---------->| SDA           |
+|         SCL |---------->| SCL           |
+|         5V  |---------->| VCC           |
+|         GND |---------->| GND           |
++-------------+           +---------------+
+
++-------------+           +---------------+
+| ESP32/8266  |           |  Push Buttons |
+|             |           |               |
+|         D5  |<----------| Button 1 (Select) |
+|         D6  |<----------| Button 2 (Up)     |
+|         D7  |<----------| Button 3 (Down)   |
+|         D8  |<----------| Button 4 (Back)   |
++-------------+           +---------------+
+                             |     |
+                             |     |
+                            GND   10K Resistors
+                                   |
+                                   |
+                                  3.3V
+                                  
++-------------+           +---------------+
+| ESP32/8266  |           |     LEDs      |
+|             |           |               |
+|         D1  |---------->| Green LED     |
+|         D2  |---------->| Red LED       |
+|         D3  |---------->| Yellow LED    |
++-------------+           +---------------+
+                             |     |
+                             |     |
+                            GND   220 Resistors
+
+NOTES:
+------
+1. All buttons are connected with 10K pull-up resistors
+2. All LEDs are connected with 220-ohm current-limiting resistors
+3. The fingerprint sensor (FPM10A) uses 3.3V logic level
+4. The LCD is connected via I2C to minimize pin usage
+5. For ESP8266, use appropriate GPIO pins if the designated pins are unavailable

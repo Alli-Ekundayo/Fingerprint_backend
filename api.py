@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 api = Blueprint('api', __name__)
 
 @api.route('/attendance', methods=['GET'])
-@login_required
 def get_attendance():
     """API endpoint to get attendance records"""
     try:
@@ -101,33 +100,63 @@ def record_attendance():
         if not data:
             return json_response({"error": "No data provided"}, 400)
         
-        required_fields = ['student_id', 'course_id', 'timestamp', 'status']
+        # For Arduino, we only require student_id and course_id
+        # timestamp and status are optional with defaults
+        required_fields = ['student_id', 'course_id']
         for field in required_fields:
             if field not in data:
                 return json_response({"error": f"Missing required field: {field}"}, 400)
         
-        # Find student by student_id string
-        student = Student.query.filter_by(student_id=data['student_id']).first()
+        # Find student by database ID or student_id string
+        student = None
+        student_id_value = data['student_id']
+        
+        # First try to interpret as database ID
+        try:
+            student_id_int = int(student_id_value)
+            student = Student.query.get(student_id_int)
+        except (ValueError, TypeError):
+            # Not an integer or conversion failed
+            pass
+            
+        # If not found by ID, try to find by student_id string
         if not student:
-            return json_response({"error": "Student not found"}, 404)
+            student = Student.query.filter_by(student_id=str(student_id_value)).first()
+        
+        if not student:
+            return json_response({"error": "Student not found", "student_id": str(student_id_value)}, 404)
         
         # Find course
         course = Course.query.get(data['course_id'])
         if not course:
-            return json_response({"error": "Course not found"}, 404)
+            return json_response({"error": "Course not found", "course_id": str(data['course_id'])}, 404)
             
-        # Parse timestamp
-        try:
-            timestamp = datetime.fromisoformat(data['timestamp'])
-        except ValueError:
+        # Get timestamp (default to current time if not provided)
+        if 'timestamp' in data and data['timestamp']:
+            try:
+                # Try ISO format first
+                timestamp = datetime.fromisoformat(data['timestamp'])
+            except (ValueError, TypeError):
+                try:
+                    # Try other common formats
+                    timestamp = datetime.strptime(data['timestamp'], '%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError):
+                    # Default to current time
+                    timestamp = datetime.utcnow()
+        else:
             timestamp = datetime.utcnow()
+        
+        # Get status (default to 'present' if not provided)
+        status = data.get('status', 'present')
+        if status not in ['present', 'late', 'absent']:
+            status = 'present'  # Default to present for invalid status
         
         # Create attendance record
         attendance = Attendance(
             student_id=student.id,
             course_id=course.id,
             timestamp=timestamp,
-            status=data['status'],
+            status=status,
             synced=True  # This is coming from an API, so it's already synced
         )
         
@@ -146,7 +175,6 @@ def record_attendance():
         return json_response({"error": "Internal server error"}, 500)
 
 @api.route('/students', methods=['GET'])
-@login_required
 def get_students():
     """API endpoint to get student list"""
     try:
@@ -173,9 +201,8 @@ def get_students():
         return json_response({"error": "Internal server error"}, 500)
 
 @api.route('/courses', methods=['GET'])
-@login_required
 def get_courses():
-    """API endpoint to get course list"""
+    """API endpoint to get course list (accessible to IoT devices)"""
     try:
         courses = Course.query.all()
         
@@ -240,6 +267,53 @@ def get_statistics():
         
     except Exception as e:
         logger.error(f"Error fetching statistics: {str(e)}")
+        return json_response({"error": "Internal server error"}, 500)
+
+@api.route('/verify-fingerprint', methods=['POST'])
+def verify_fingerprint():
+    """API endpoint for IoT device to verify a fingerprint template"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return json_response({"error": "No data provided"}, 400)
+            
+        # In a real implementation, we would receive a fingerprint template
+        # and compare it against stored templates in the database
+        
+        # For this demo, we'll just check if fingerprint_id is provided
+        if 'fingerprint_id' not in data:
+            return json_response({"error": "Missing fingerprint_id field"}, 400)
+            
+        fingerprint_id = data['fingerprint_id']
+        
+        # Find fingerprint in database
+        from models import Fingerprint
+        fingerprint = Fingerprint.query.filter_by(finger_id=fingerprint_id).first()
+        
+        if not fingerprint:
+            return json_response({
+                "success": False,
+                "message": "No matching fingerprint found"
+            })
+            
+        # Get the student associated with the fingerprint
+        student = Student.query.get(fingerprint.student_id)
+        
+        # Return student information
+        return jsonify({
+            "success": True,
+            "message": "Fingerprint verified",
+            "student": {
+                "id": student.id,
+                "student_id": student.student_id,
+                "name": f"{student.first_name} {student.last_name}",
+                "fingerprint_id": fingerprint.finger_id
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Error verifying fingerprint: {str(e)}")
         return json_response({"error": "Internal server error"}, 500)
 
 def register_api_routes(app):
