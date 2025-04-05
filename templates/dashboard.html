@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - IoT Fingerprint Attendance System{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h2 mb-0">Dashboard</h1>
+    <button id="refreshBtn" class="btn btn-sm btn-outline-secondary" onclick="refreshStatistics()">
+        <i class="fas fa-sync-alt me-1"></i> Refresh
+        <span id="refreshSpinner" class="spinner-border spinner-border-sm d-none" role="status"></span>
+    </button>
+</div>
+
+<!-- Stats Cards -->
+<div class="row mb-4">
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card border-0 stat-card primary h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="text-muted mb-1">Total Students</h6>
+                        <h2 class="mb-0" id="studentCount">{{ student_count|default(0) }}</h2>
+                    </div>
+                    <div class="icon-shape bg-primary bg-opacity-10 text-primary rounded-3 p-3">
+                        <i class="fas fa-user-graduate fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card border-0 stat-card info h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="text-muted mb-1">Total Courses</h6>
+                        <h2 class="mb-0" id="courseCount">{{ course_count|default(0) }}</h2>
+                    </div>
+                    <div class="icon-shape bg-info bg-opacity-10 text-info rounded-3 p-3">
+                        <i class="fas fa-book fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card border-0 stat-card success h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="text-muted mb-1">Today's Attendance</h6>
+                        <h2 class="mb-0" id="todayAttendance">{{ today_attendance|default(0) }}</h2>
+                    </div>
+                    <div class="icon-shape bg-success bg-opacity-10 text-success rounded-3 p-3">
+                        <i class="fas fa-clipboard-check fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-xl-3 col-md-6 mb-4">
+        <div class="card border-0 stat-card warning h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="text-muted mb-1">Total Records</h6>
+                        <h2 class="mb-0" id="attendanceCount">{{ attendance_count|default(0) }}</h2>
+                    </div>
+                    <div class="icon-shape bg-warning bg-opacity-10 text-warning rounded-3 p-3">
+                        <i class="fas fa-chart-bar fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Charts Row -->
+<div class="row mb-4">
+    <div class="col-lg-8 mb-4">
+        <div class="card border-0 h-100">
+            <div class="card-header bg-transparent">
+                <h5 class="card-title mb-0">Weekly Attendance</h5>
+            </div>
+            <div class="card-body">
+                <div style="height: 300px;">
+                    <canvas id="attendanceChart"></canvas>
+                </div>
+                <div id="attendanceChartData" data-chart-data='{{ weekly_data|tojson }}'></div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4 mb-4">
+        <div class="card border-0 h-100">
+            <div class="card-header bg-transparent">
+                <h5 class="card-title mb-0">Attendance by Course</h5>
+            </div>
+            <div class="card-body">
+                <div style="height: 300px;">
+                    <canvas id="courseStatsChart"></canvas>
+                </div>
+                {% set chart_data = [] %}
+                {% for stat in course_stats %}
+                    {% do chart_data.append({'course': stat.course.course_code, 'rate': stat.rate}) %}
+                {% endfor %}
+                <div id="courseStatsData" data-chart-data='{{ chart_data|tojson }}'></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Attendance & Course Stats -->
+<div class="row">
+    <div class="col-lg-7 mb-4">
+        <div class="card border-0">
+            <div class="card-header bg-transparent d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">Recent Attendance</h5>
+                <a href="{{ url_for('attendance') }}" class="btn btn-sm btn-outline-primary">View All</a>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Student</th>
+                                <th>Course</th>
+                                <th>Time</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for record in recent_attendance %}
+                            <tr>
+                                <td>{{ record.student.first_name }} {{ record.student.last_name }}</td>
+                                <td>{{ record.course.course_code }}</td>
+                                <td>{{ record.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+                                <td>
+                                    <span class="status-indicator status-{{ record.status }}"></span>
+                                    {{ record.status|capitalize }}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="4" class="text-center py-3">No attendance records found</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-5 mb-4">
+        <div class="card border-0">
+            <div class="card-header bg-transparent d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">Course Statistics</h5>
+                <a href="{{ url_for('courses') }}" class="btn btn-sm btn-outline-primary">View Courses</a>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Course</th>
+                                <th>Attendance Rate</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for stat in course_stats %}
+                            <tr>
+                                <td>{{ stat.course.course_code }} - {{ stat.course.title }}</td>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <div class="progress flex-grow-1 me-2" style="height: 8px;">
+                                            <div class="progress-bar bg-success" role="progressbar" style="width: {{ stat.rate }}%" 
+                                                 aria-valuenow="{{ stat.rate }}" aria-valuemin="0" aria-valuemax="100"></div>
+                                        </div>
+                                        <span>{{ stat.rate }}%</span>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="2" class="text-center py-3">No course statistics available</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

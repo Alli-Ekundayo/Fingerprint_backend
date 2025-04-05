@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+
+{% block title %}Attendance - IoT Fingerprint Attendance System{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h2 mb-0">Attendance Management</h1>
+    <div>
+        <a href="{{ url_for('scan') }}" class="btn btn-primary me-2">
+            <i class="fas fa-fingerprint me-1"></i> Scan Fingerprint
+        </a>
+        <button id="syncBtn" class="btn btn-outline-secondary" onclick="syncAttendanceData()">
+            <i class="fas fa-sync-alt me-1"></i> Sync Data
+            <span id="syncSpinner" class="spinner-border spinner-border-sm d-none" role="status"></span>
+        </button>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Manual Attendance Form -->
+    <div class="col-lg-4 mb-4">
+        <div class="card border-0">
+            <div class="card-header bg-transparent">
+                <h5 class="card-title mb-0">Record Attendance Manually</h5>
+            </div>
+            <div class="card-body">
+                <form method="POST" action="{{ url_for('attendance') }}">
+                    {{ form.hidden_tag() }}
+                    
+                    <div class="mb-3">
+                        <label for="{{ form.student.id }}" class="form-label">{{ form.student.label }}</label>
+                        {{ form.student(class="form-select") }}
+                        {% for error in form.student.errors %}
+                            <div class="text-danger">{{ error }}</div>
+                        {% endfor %}
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="{{ form.course.id }}" class="form-label">{{ form.course.label }}</label>
+                        {{ form.course(class="form-select") }}
+                        {% for error in form.course.errors %}
+                            <div class="text-danger">{{ error }}</div>
+                        {% endfor %}
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="{{ form.status.id }}" class="form-label">{{ form.status.label }}</label>
+                        {{ form.status(class="form-select") }}
+                        {% for error in form.status.errors %}
+                            <div class="text-danger">{{ error }}</div>
+                        {% endfor %}
+                    </div>
+                    
+                    <div class="d-grid">
+                        {{ form.submit(class="btn btn-primary") }}
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Attendance Records -->
+    <div class="col-lg-8 mb-4">
+        <div class="card border-0">
+            <div class="card-header bg-transparent d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">Recent Attendance Records</h5>
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" id="exportDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                        <i class="fas fa-download me-1"></i> Export
+                    </button>
+                    <ul class="dropdown-menu" aria-labelledby="exportDropdown">
+                        <li><a class="dropdown-item" href="#">Export as CSV</a></li>
+                        <li><a class="dropdown-item" href="#">Export as PDF</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+                    <table class="table table-hover attendance-table mb-0">
+                        <thead>
+                            <tr>
+                                <th>Student</th>
+                                <th>Course</th>
+                                <th>Date & Time</th>
+                                <th>Status</th>
+                                <th>Sync</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for record in attendance_records %}
+                            <tr>
+                                <td>{{ record.student.first_name }} {{ record.student.last_name }}</td>
+                                <td>{{ record.course.course_code }}</td>
+                                <td>{{ record.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+                                <td>
+                                    <span class="status-indicator status-{{ record.status }}"></span>
+                                    {{ record.status|capitalize }}
+                                </td>
+                                <td>
+                                    {% if record.synced %}
+                                    <span class="sync-indicator synced">
+                                        <i class="fas fa-check-circle"></i> Synced
+                                    </span>
+                                    {% else %}
+                                    <span class="sync-indicator unsynced">
+                                        <i class="fas fa-clock"></i> Pending
+                                    </span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="5" class="text-center py-3">No attendance records found</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Attendance Statistics -->
+<div class="row">
+    <div class="col-12">
+        <div class="card border-0">
+            <div class="card-header bg-transparent">
+                <h5 class="card-title mb-0">Attendance Status Distribution</h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-md-4 mb-3">
+                        <div class="p-3 rounded bg-success bg-opacity-10">
+                            <h3 class="text-success">
+                                <i class="fas fa-check-circle me-2"></i> Present
+                            </h3>
+                            <h2 class="mt-2 mb-0">
+                                {% set present_count = attendance_records|selectattr('status', 'equalto', 'present')|list|length %}
+                                {% set total_count = attendance_records|length %}
+                                {% if total_count > 0 %}
+                                    {{ (present_count / total_count * 100)|round|int }}%
+                                {% else %}
+                                    0%
+                                {% endif %}
+                            </h2>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-4 mb-3">
+                        <div class="p-3 rounded bg-warning bg-opacity-10">
+                            <h3 class="text-warning">
+                                <i class="fas fa-exclamation-circle me-2"></i> Late
+                            </h3>
+                            <h2 class="mt-2 mb-0">
+                                {% set late_count = attendance_records|selectattr('status', 'equalto', 'late')|list|length %}
+                                {% if total_count > 0 %}
+                                    {{ (late_count / total_count * 100)|round|int }}%
+                                {% else %}
+                                    0%
+                                {% endif %}
+                            </h2>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-4 mb-3">
+                        <div class="p-3 rounded bg-danger bg-opacity-10">
+                            <h3 class="text-danger">
+                                <i class="fas fa-times-circle me-2"></i> Absent
+                            </h3>
+                            <h2 class="mt-2 mb-0">
+                                {% set absent_count = attendance_records|selectattr('status', 'equalto', 'absent')|list|length %}
+                                {% if total_count > 0 %}
+                                    {{ (absent_count / total_count * 100)|round|int }}%
+                                {% else %}
+                                    0%
+                                {% endif %}
+                            </h2>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // This will be handled by the attendance.js script already included in base.html
+</script>
+{% endblock %}

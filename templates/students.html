@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+
+{% block title %}Students - IoT Fingerprint Attendance System{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h2 mb-0">{% if add_mode %}Add Student{% elif student %}Edit Student{% else %}Students{% endif %}</h1>
+    {% if not add_mode and not student %}
+    <a href="{{ url_for('add_student') }}" class="btn btn-primary">
+        <i class="fas fa-plus me-1"></i> Add Student
+    </a>
+    {% endif %}
+</div>
+
+{% if add_mode or student %}
+<!-- Student Form -->
+<div class="card border-0 mb-4">
+    <div class="card-body">
+        <form method="POST" action="{% if student %}{{ url_for('edit_student', id=student.id) }}{% else %}{{ url_for('add_student') }}{% endif %}">
+            {{ form.hidden_tag() }}
+            
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="{{ form.student_id.id }}" class="form-label">{{ form.student_id.label }}</label>
+                    {{ form.student_id(class="form-control") }}
+                    {% for error in form.student_id.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                    {% endfor %}
+                </div>
+                
+                <div class="col-md-6 mb-3">
+                    <label for="{{ form.email.id }}" class="form-label">{{ form.email.label }}</label>
+                    {{ form.email(class="form-control") }}
+                    {% for error in form.email.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="{{ form.first_name.id }}" class="form-label">{{ form.first_name.label }}</label>
+                    {{ form.first_name(class="form-control") }}
+                    {% for error in form.first_name.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                    {% endfor %}
+                </div>
+                
+                <div class="col-md-6 mb-3">
+                    <label for="{{ form.last_name.id }}" class="form-label">{{ form.last_name.label }}</label>
+                    {{ form.last_name(class="form-control") }}
+                    {% for error in form.last_name.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <div class="mb-3">
+                <label for="{{ form.courses.id }}" class="form-label">{{ form.courses.label }}</label>
+                {{ form.courses(class="form-select") }}
+                {% for error in form.courses.errors %}
+                    <div class="text-danger">{{ error }}</div>
+                {% endfor %}
+                <div class="form-text">You can add more courses after creating the student.</div>
+            </div>
+            
+            <div class="d-flex justify-content-between">
+                <a href="{{ url_for('students') }}" class="btn btn-secondary">Cancel</a>
+                {{ form.submit(class="btn btn-primary") }}
+            </div>
+        </form>
+    </div>
+</div>
+
+{% else %}
+<!-- Student Search -->
+<div class="card border-0 mb-4">
+    <div class="card-body">
+        <form method="GET" action="{{ url_for('students') }}" class="row g-2">
+            <div class="col-md-8">
+                {{ form.query(class="form-control", placeholder="Search by name or ID...") }}
+            </div>
+            <div class="col-md-4">
+                <button type="submit" class="btn btn-primary w-100">
+                    <i class="fas fa-search me-1"></i> Search
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Student List -->
+<div class="card border-0">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Courses</th>
+                        <th>Fingerprints</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for student in students %}
+                    <tr>
+                        <td>{{ student.student_id }}</td>
+                        <td>{{ student.first_name }} {{ student.last_name }}</td>
+                        <td>{{ student.email or '-' }}</td>
+                        <td>
+                            <span class="badge bg-info me-1">{{ student.courses|length }}</span>
+                            {% for course in student.courses %}
+                            <span class="badge bg-secondary">{{ course.course_code }}</span>
+                            {% endfor %}
+                        </td>
+                        <td>
+                            <span class="badge bg-{{ 'success' if student.fingerprints else 'warning' }}">
+                                {{ student.fingerprints|length }}
+                            </span>
+                        </td>
+                        <td>
+                            <div class="btn-group btn-group-sm">
+                                <a href="{{ url_for('edit_student', id=student.id) }}" class="btn btn-outline-primary">
+                                    <i class="fas fa-edit"></i>
+                                </a>
+                                <button type="button" class="btn btn-outline-danger" 
+                                        data-bs-toggle="modal" data-bs-target="#deleteModal{{ student.id }}">
+                                    <i class="fas fa-trash-alt"></i>
+                                </button>
+                            </div>
+                            
+                            <!-- Delete Confirmation Modal -->
+                            <div class="modal fade" id="deleteModal{{ student.id }}" tabindex="-1" aria-labelledby="deleteModalLabel{{ student.id }}" aria-hidden="true">
+                                <div class="modal-dialog">
+                                    <div class="modal-content">
+                                        <div class="modal-header">
+                                            <h5 class="modal-title" id="deleteModalLabel{{ student.id }}">Confirm Deletion</h5>
+                                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            Are you sure you want to delete student <strong>{{ student.first_name }} {{ student.last_name }}</strong>?
+                                            This will remove all associated fingerprints and attendance records.
+                                        </div>
+                                        <div class="modal-footer">
+                                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                            <form action="{{ url_for('delete_student', id=student.id) }}" method="POST">
+                                                <button type="submit" class="btn btn-danger">Delete</button>
+                                            </form>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" class="text-center py-3">No students found</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

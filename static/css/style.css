@@ -1,0 +1,187 @@
+/* Custom styles for the Fingerprint Attendance System */
+
+/* Add some spacing to the main content area */
+.main-content {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+}
+
+/* Style for fingerprint scanning components */
+.fingerprint-reader {
+    width: 200px;
+    height: 200px;
+    margin: 0 auto;
+    border: 2px solid var(--bs-info);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    background-color: rgba(13, 202, 240, 0.1);
+}
+
+.fingerprint-animation {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background-color: rgba(13, 202, 240, 0.3);
+    position: relative;
+    overflow: hidden;
+}
+
+.fingerprint-animation::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: 
+        radial-gradient(circle at center, transparent 25%, rgba(13, 202, 240, 0.5) 26%, transparent 27%),
+        radial-gradient(circle at center, rgba(13, 202, 240, 0.3) 0%, transparent 70%);
+    background-size: 20px 20px, 100% 100%;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% {
+        opacity: 0.3;
+        transform: scale(0.8);
+    }
+    50% {
+        opacity: 1;
+        transform: scale(1.2);
+    }
+    100% {
+        opacity: 0.3;
+        transform: scale(0.8);
+    }
+}
+
+.scanning .fingerprint-animation::before {
+    animation: scan 1.5s infinite;
+}
+
+@keyframes scan {
+    0% {
+        background-position: 0 0, 0 0;
+    }
+    100% {
+        background-position: 0 100px, 0 0;
+    }
+}
+
+/* Status indicators */
+.status-indicator {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 5px;
+}
+
+.status-present {
+    background-color: var(--bs-success);
+}
+
+.status-late {
+    background-color: var(--bs-warning);
+}
+
+.status-absent {
+    background-color: var(--bs-danger);
+}
+
+/* Dashboard stats cards */
+.stat-card {
+    border-left: 5px solid;
+    transition: transform 0.2s;
+}
+
+.stat-card:hover {
+    transform: translateY(-5px);
+}
+
+.stat-card.primary {
+    border-left-color: var(--bs-primary);
+}
+
+.stat-card.success {
+    border-left-color: var(--bs-success);
+}
+
+.stat-card.info {
+    border-left-color: var(--bs-info);
+}
+
+.stat-card.warning {
+    border-left-color: var(--bs-warning);
+}
+
+.stat-card.danger {
+    border-left-color: var(--bs-danger);
+}
+
+/* Enrollment progress bar */
+.enrollment-progress {
+    height: 10px;
+}
+
+/* Student list card */
+.student-card {
+    transition: all 0.2s;
+}
+
+.student-card:hover {
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+/* Attendance history table */
+.attendance-table th {
+    position: sticky;
+    top: 0;
+    background-color: var(--bs-dark);
+    z-index: 1;
+}
+
+/* Loading spinner */
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+}
+
+.loading-spinner {
+    width: 3rem;
+    height: 3rem;
+}
+
+/* Toast notifications */
+.toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 1050;
+}
+
+/* Sync indicator */
+.sync-indicator {
+    display: inline-block;
+    margin-left: 5px;
+    font-size: 0.875rem;
+}
+
+.sync-indicator.synced {
+    color: var(--bs-success);
+}
+
+.sync-indicator.unsynced {
+    color: var(--bs-warning);
+}

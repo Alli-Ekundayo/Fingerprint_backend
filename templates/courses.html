@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}Courses - IoT Fingerprint Attendance System{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h2 mb-0">{% if add_mode %}Add Course{% else %}Courses{% endif %}</h1>
+    {% if not add_mode %}
+    <a href="{{ url_for('add_course') }}" class="btn btn-primary">
+        <i class="fas fa-plus me-1"></i> Add Course
+    </a>
+    {% endif %}
+</div>
+
+{% if add_mode %}
+<!-- Course Form -->
+<div class="card border-0 mb-4">
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('add_course') }}">
+            {{ form.hidden_tag() }}
+            
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="{{ form.course_code.id }}" class="form-label">{{ form.course_code.label }}</label>
+                    {{ form.course_code(class="form-control") }}
+                    {% for error in form.course_code.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                    {% endfor %}
+                </div>
+                
+                <div class="col-md-6 mb-3">
+                    <label for="{{ form.title.id }}" class="form-label">{{ form.title.label }}</label>
+                    {{ form.title(class="form-control") }}
+                    {% for error in form.title.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <div class="mb-3">
+                <label for="{{ form.description.id }}" class="form-label">{{ form.description.label }}</label>
+                {{ form.description(class="form-control", rows=3) }}
+                {% for error in form.description.errors %}
+                    <div class="text-danger">{{ error }}</div>
+                {% endfor %}
+            </div>
+            
+            <div class="d-flex justify-content-between">
+                <a href="{{ url_for('courses') }}" class="btn btn-secondary">Cancel</a>
+                {{ form.submit(class="btn btn-primary") }}
+            </div>
+        </form>
+    </div>
+</div>
+
+{% else %}
+<!-- Course List -->
+<div class="row">
+    {% for course in courses %}
+    <div class="col-md-6 col-lg-4 mb-4">
+        <div class="card h-100 border-0 student-card">
+            <div class="card-body">
+                <div class="d-flex align-items-center mb-3">
+                    <div class="rounded-circle bg-primary bg-opacity-10 p-3 me-3">
+                        <i class="fas fa-book text-primary fa-2x"></i>
+                    </div>
+                    <div>
+                        <h5 class="card-title mb-0">{{ course.course_code }}</h5>
+                        <p class="text-muted mb-0">{{ course.title }}</p>
+                    </div>
+                </div>
+                
+                <p class="card-text mb-3">
+                    {% if course.description %}
+                        {{ course.description|truncate(100) }}
+                    {% else %}
+                        <span class="text-muted">No description available</span>
+                    {% endif %}
+                </p>
+                
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <span class="badge bg-info">
+                            <i class="fas fa-user-graduate me-1"></i> {{ course.students.count() }} Students
+                        </span>
+                        <span class="badge bg-secondary">
+                            <i class="fas fa-clipboard-check me-1"></i> {{ course.attendances|length }} Records
+                        </span>
+                    </div>
+                    
+                    <div class="dropdown">
+                        <button class="btn btn-sm btn-outline-secondary" type="button" id="courseActions{{ course.id }}" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="fas fa-ellipsis-v"></i>
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="courseActions{{ course.id }}">
+                            <li><a class="dropdown-item" href="#">
+                                <i class="fas fa-edit me-2"></i> Edit Course
+                            </a></li>
+                            <li><a class="dropdown-item" href="#">
+                                <i class="fas fa-users me-2"></i> Manage Students
+                            </a></li>
+                            <li><a class="dropdown-item" href="#">
+                                <i class="fas fa-chart-bar me-2"></i> View Attendance
+                            </a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item text-danger" href="#" data-bs-toggle="modal" data-bs-target="#deleteCourseModal{{ course.id }}">
+                                <i class="fas fa-trash-alt me-2"></i> Delete Course
+                            </a></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Delete Confirmation Modal -->
+            <div class="modal fade" id="deleteCourseModal{{ course.id }}" tabindex="-1" aria-labelledby="deleteCourseModalLabel{{ course.id }}" aria-hidden="true">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="deleteCourseModalLabel{{ course.id }}">Confirm Deletion</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            Are you sure you want to delete course <strong>{{ course.course_code }} - {{ course.title }}</strong>?
+                            This will remove all associated attendance records.
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <form action="#" method="POST">
+                                <button type="submit" class="btn btn-danger">Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-12">
+        <div class="alert alert-info">
+            <i class="fas fa-info-circle me-2"></i> No courses have been added yet. Click the "Add Course" button to create your first course.
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
