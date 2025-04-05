@@ -103,11 +103,12 @@
                 <div style="height: 300px;">
                     <canvas id="courseStatsChart"></canvas>
                 </div>
-                {% set chart_data = [] %}
-                {% for stat in course_stats %}
-                    {% do chart_data.append({'course': stat.course.course_code, 'rate': stat.rate}) %}
-                {% endfor %}
-                <div id="courseStatsData" data-chart-data='{{ chart_data|tojson }}'></div>
+                <div id="courseStatsData" data-chart-data='[
+                    {% for stat in course_stats %}
+                        {"course": "{{ stat.course.course_code }}", "rate": {{ stat.rate }}}
+                        {%- if not loop.last %},{% endif -%}
+                    {% endfor %}
+                ]'></div>
             </div>
         </div>
     </div>
