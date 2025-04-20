@@ -1,23 +1,3 @@
-/*
- * IoT-based Fingerprint Attendance System
- * 
- * This sketch implements a fingerprint-based attendance system that
- * communicates with a Flask backend server via WiFi.
- * 
- * Hardware:
- * - ESP8266/ESP32
- * - Adafruit Fingerprint Sensor (FPM10A)
- * - 16x2 LCD with I2C adapter
- * - Push buttons for user interaction
- * - LED indicators
- * 
- * Libraries Required:
- * - ESP8266WiFi (for ESP8266) or WiFi (for ESP32)
- * - Adafruit_Fingerprint
- * - LiquidCrystal_I2C
- * - ArduinoJson
- * - ESP8266HTTPClient or HTTPClient
- */
 
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>

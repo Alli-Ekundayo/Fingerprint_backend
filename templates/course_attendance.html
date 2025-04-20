@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+
+{% block title %}Attendance Records for {{ course.course_code }} - IoT Fingerprint Attendance System{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h2 mb-0">Attendance: {{ course.course_code }} - {{ course.title }}</h1>
+    <a href="{{ url_for('courses') }}" class="btn btn-secondary">
+        <i class="fas fa-arrow-left me-1"></i> Back to Courses
+    </a>
+</div>
+
+<div class="card border-0 mb-4">
+    <div class="card-header bg-transparent d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="fas fa-clipboard-list me-2"></i> Attendance Records</h5>
+        <div>
+            <span class="badge bg-info">
+                <i class="fas fa-user-graduate me-1"></i> {{ course.students.count() }} Students
+            </span>
+            <span class="badge bg-secondary ms-2">
+                <i class="fas fa-clipboard-check me-1"></i> {{ course.attendances|length }} Records
+            </span>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        {% if grouped_records %}
+            <div class="accordion" id="attendanceAccordion">
+                {% for date, records in grouped_records.items() %}
+                <div class="accordion-item border-0">
+                    <h2 class="accordion-header" id="heading{{ loop.index }}">
+                        <button class="accordion-button {% if not loop.first %}collapsed{% endif %}" type="button" 
+                                data-bs-toggle="collapse" data-bs-target="#collapse{{ loop.index }}" 
+                                aria-expanded="{{ 'true' if loop.first else 'false' }}" aria-controls="collapse{{ loop.index }}">
+                            <strong>{{ date }}</strong>
+                            <span class="badge rounded-pill bg-primary ms-2">{{ records|length }} Records</span>
+                        </button>
+                    </h2>
+                    <div id="collapse{{ loop.index }}" class="accordion-collapse collapse {% if loop.first %}show{% endif %}" 
+                         aria-labelledby="heading{{ loop.index }}" data-bs-parent="#attendanceAccordion">
+                        <div class="accordion-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-hover mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Student</th>
+                                            <th>Student ID</th>
+                                            <th>Time</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for record in records %}
+                                        <tr>
+                                            <td>{{ record.student.first_name }} {{ record.student.last_name }}</td>
+                                            <td>{{ record.student.student_id }}</td>
+                                            <td>{{ record.timestamp.strftime('%H:%M:%S') }}</td>
+                                            <td>
+                                                {% if record.status == 'present' %}
+                                                <span class="badge bg-success">Present</span>
+                                                {% elif record.status == 'late' %}
+                                                <span class="badge bg-warning">Late</span>
+                                                {% elif record.status == 'absent' %}
+                                                <span class="badge bg-danger">Absent</span>
+                                                {% else %}
+                                                <span class="badge bg-secondary">{{ record.status }}</span>
+                                                {% endif %}
+                                            </td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="p-4 text-center">
+                <p class="text-muted mb-0">
+                    <i class="fas fa-info-circle me-2"></i> No attendance records available for this course.
+                </p>
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card border-0">
+    <div class="card-header bg-transparent">
+        <h5 class="mb-0"><i class="fas fa-chart-pie me-2"></i> Attendance Overview</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-6 mb-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <h5 class="card-title text-center">Attendance Rate</h5>
+                        <div class="d-flex justify-content-center align-items-center flex-column">
+                            {% set present_count = namespace(value=0) %}
+                            {% set total_count = namespace(value=0) %}
+                            
+                            {% for records in grouped_records.values() %}
+                                {% for record in records %}
+                                    {% set total_count.value = total_count.value + 1 %}
+                                    {% if record.status == 'present' %}
+                                        {% set present_count.value = present_count.value + 1 %}
+                                    {% endif %}
+                                {% endfor %}
+                            {% endfor %}
+                            
+                            {% if total_count.value > 0 %}
+                                {% set attendance_rate = (present_count.value / total_count.value) * 100 %}
+                                <div class="position-relative" style="width: 150px; height: 150px;">
+                                    <div class="position-absolute top-50 start-50 translate-middle text-center">
+                                        <h3>{{ "%.1f"|format(attendance_rate) }}%</h3>
+                                        <small class="text-muted">Present</small>
+                                    </div>
+                                    <canvas id="attendanceRateChart" width="150" height="150"></canvas>
+                                </div>
+                            {% else %}
+                                <p class="text-muted text-center">No data available</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6 mb-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <h5 class="card-title text-center">Status Distribution</h5>
+                        <div class="d-flex justify-content-center align-items-center flex-column">
+                            {% set present_count = namespace(value=0) %}
+                            {% set late_count = namespace(value=0) %}
+                            {% set absent_count = namespace(value=0) %}
+                            
+                            {% for records in grouped_records.values() %}
+                                {% for record in records %}
+                                    {% if record.status == 'present' %}
+                                        {% set present_count.value = present_count.value + 1 %}
+                                    {% elif record.status == 'late' %}
+                                        {% set late_count.value = late_count.value + 1 %}
+                                    {% elif record.status == 'absent' %}
+                                        {% set absent_count.value = absent_count.value + 1 %}
+                                    {% endif %}
+                                {% endfor %}
+                            {% endfor %}
+                            
+                            {% if present_count.value > 0 or late_count.value > 0 or absent_count.value > 0 %}
+                                <canvas id="statusDistributionChart" width="200" height="200"></canvas>
+                                <div class="d-flex justify-content-center mt-3">
+                                    <span class="badge bg-success mx-1">Present: {{ present_count.value }}</span>
+                                    <span class="badge bg-warning mx-1">Late: {{ late_count.value }}</span>
+                                    <span class="badge bg-danger mx-1">Absent: {{ absent_count.value }}</span>
+                                </div>
+                            {% else %}
+                                <p class="text-muted text-center">No data available</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Attendance Rate Chart
+    var attendanceRateCanvas = document.getElementById('attendanceRateChart');
+    if (attendanceRateCanvas) {
+        var attendanceRate = {{ (present_count.value / total_count.value * 100) if total_count.value > 0 else 0 }};
+        new Chart(attendanceRateCanvas, {
+            type: 'doughnut',
+            data: {
+                labels: ['Present', 'Absent/Late'],
+                datasets: [{
+                    data: [attendanceRate, 100 - attendanceRate],
+                    backgroundColor: ['#198754', '#e9ecef'],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                cutout: '70%',
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        enabled: false
+                    }
+                }
+            }
+        });
+    }
+    
+    // Status Distribution Chart
+    var statusDistCanvas = document.getElementById('statusDistributionChart');
+    if (statusDistCanvas) {
+        var presentCount = {{ present_count.value }};
+        var lateCount = {{ late_count.value }};
+        var absentCount = {{ absent_count.value }};
+        
+        new Chart(statusDistCanvas, {
+            type: 'pie',
+            data: {
+                labels: ['Present', 'Late', 'Absent'],
+                datasets: [{
+                    data: [presentCount, lateCount, absentCount],
+                    backgroundColor: ['#198754', '#ffc107', '#dc3545'],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom'
+                    }
+                }
+            }
+        });
+    }
+});
+</script>
+{% endblock %}

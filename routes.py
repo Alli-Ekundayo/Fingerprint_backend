@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from flask import render_template, redirect, url_for, flash, request, jsonify, session
 from flask_login import login_user, logout_user, login_required, current_user
 from urllib.parse import urlparse
-from app import db
+from app import db, csrf
 from models import User, Student, Course, Attendance, Fingerprint
 from forms import (
     LoginForm, RegistrationForm, StudentForm, CourseForm, EnrollmentForm, 
@@ -53,6 +53,29 @@ def register_routes(app):
             
         return render_template('login.html', title='Sign In', form=form)
     
+    @csrf.exempt
+    @app.route('/api/login', methods=['GET', 'POST'])
+    def api_login():
+        if current_user.is_authenticated:
+            return jsonify({"message": "Already logged in"}), 200
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Missing JSON payload"}), 400
+
+        username = data.get("username")
+        password = data.get("password")
+
+        if not username or not password:
+            return jsonify({"error": "Missing credentials"}), 400
+
+        user = User.query.filter_by(username=username).first()
+        if not user or not user.check_password(password):
+            return jsonify({"error": "Invalid credentials"}), 401
+
+        login_user(user)
+        return jsonify({"message": "Login successful"}), 200
+
     @app.route('/logout')
     def logout():
         """User logout route"""
@@ -215,10 +238,28 @@ def register_routes(app):
     @login_required
     def delete_student(id):
         """Delete a student"""
-        student = Student.query.get_or_404(id)
-        db.session.delete(student)
-        db.session.commit()
-        flash(f'Student {student.first_name} {student.last_name} has been deleted!', 'success')
+        try:
+            student = Student.query.get_or_404(id)
+            
+            # First delete all fingerprints associated with the student
+            Fingerprint.query.filter_by(student_id=student.id).delete()
+            
+            # Then delete all attendance records associated with the student
+            Attendance.query.filter_by(student_id=student.id).delete()
+            
+            # Remove the student from all courses (many-to-many relationship)
+            student.courses = []
+            
+            # Finally delete the student
+            db.session.delete(student)
+            db.session.commit()
+            
+            flash(f'Student {student.first_name} {student.last_name} has been deleted!', 'success')
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Error deleting student {id}: {str(e)}")
+            flash(f'Failed to delete student. Error: {str(e)}', 'danger')
+        
         return redirect(url_for('students'))
     
     @app.route('/courses', methods=['GET'])
@@ -249,6 +290,125 @@ def register_routes(app):
             return redirect(url_for('courses'))
             
         return render_template('courses.html', title='Add Course', form=form, add_mode=True)
+        
+    @app.route('/courses/edit/<int:id>', methods=['GET', 'POST'])
+    @login_required
+    def edit_course(id):
+        """Edit a course"""
+        course = Course.query.get_or_404(id)
+        form = CourseForm()
+        
+        # Only the creator or an admin can edit the course
+        if course.user_id != current_user.id and not current_user.is_admin:
+            flash('You do not have permission to edit this course.', 'danger')
+            return redirect(url_for('courses'))
+            
+        if form.validate_on_submit():
+            course.course_code = form.course_code.data
+            course.title = form.title.data
+            course.description = form.description.data
+            
+            db.session.commit()
+            flash(f'Course {course.title} has been updated!', 'success')
+            return redirect(url_for('courses'))
+            
+        # Pre-populate form with existing data
+        if request.method == 'GET':
+            form.course_code.data = course.course_code
+            form.title.data = course.title
+            form.description.data = course.description
+            
+        return render_template('courses.html', title='Edit Course', 
+                              form=form, edit_mode=True, course=course)
+                              
+    @app.route('/courses/manage_students/<int:id>', methods=['GET', 'POST'])
+    @login_required
+    def manage_course_students(id):
+        """Manage students enrolled in a course"""
+        course = Course.query.get_or_404(id)
+        form = EnrollmentForm()
+        
+        # Populate student choices - exclude already enrolled students
+        enrolled_student_ids = [s.id for s in course.students]
+        available_students = Student.query.filter(~Student.id.in_(enrolled_student_ids) if enrolled_student_ids else True).all()
+        
+        form.student.choices = [(s.id, f"{s.student_id} - {s.first_name} {s.last_name}") 
+                               for s in available_students]
+        
+        if form.validate_on_submit() and available_students:
+            student = Student.query.get(form.student.data)
+            if student:
+                course.students.append(student)
+                db.session.commit()
+                flash(f'{student.first_name} {student.last_name} enrolled in {course.title}!', 'success')
+                return redirect(url_for('manage_course_students', id=course.id))
+        
+        return render_template('manage_course_students.html', title='Manage Students', 
+                              course=course, form=form)
+                              
+    @app.route('/courses/remove_student/<int:course_id>/<int:student_id>', methods=['POST'])
+    @login_required
+    def remove_student_from_course(course_id, student_id):
+        """Remove a student from a course"""
+        course = Course.query.get_or_404(course_id)
+        student = Student.query.get_or_404(student_id)
+        
+        if student in course.students:
+            course.students.remove(student)
+            db.session.commit()
+            flash(f'{student.first_name} {student.last_name} removed from {course.title}!', 'success')
+        
+        return redirect(url_for('manage_course_students', id=course_id))
+        
+    @app.route('/courses/attendance/<int:id>')
+    @login_required
+    def course_attendance(id):
+        """View attendance for a specific course"""
+        course = Course.query.get_or_404(id)
+        
+        # Get the attendance records for this course
+        attendance_records = Attendance.query.filter_by(course_id=course.id).order_by(Attendance.timestamp.desc()).all()
+        
+        # Group records by date
+        grouped_records = {}
+        for record in attendance_records:
+            date_str = record.timestamp.strftime('%Y-%m-%d')
+            if date_str not in grouped_records:
+                grouped_records[date_str] = []
+            grouped_records[date_str].append(record)
+        
+        return render_template('course_attendance.html', title=f'Attendance - {course.course_code}',
+                              course=course, grouped_records=grouped_records)
+                              
+    @app.route('/courses/delete/<int:id>', methods=['POST'])
+    @login_required
+    def delete_course(id):
+        """Delete a course"""
+        course = Course.query.get_or_404(id)
+        
+        # Only the creator or an admin can delete the course
+        if course.user_id != current_user.id and not current_user.is_admin:
+            flash('You do not have permission to delete this course.', 'danger')
+            return redirect(url_for('courses'))
+            
+        try:
+            # First delete all attendance records for this course
+            Attendance.query.filter_by(course_id=course.id).delete()
+            
+            # Remove all students from the course (many-to-many relationship)
+            course.students = []
+            
+            # Finally delete the course
+            db.session.delete(course)
+            db.session.commit()
+            
+            flash(f'Course {course.course_code} - {course.title} has been deleted!', 'success')
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Error deleting course {id}: {str(e)}")
+            flash(f'Failed to delete course. Error: {str(e)}', 'danger')
+        
+        return redirect(url_for('courses'))
     
     @app.route('/enroll', methods=['GET', 'POST'])
     @login_required

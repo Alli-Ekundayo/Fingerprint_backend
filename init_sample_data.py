@@ -5,7 +5,7 @@ This script will create sample users, students, courses, and attendance records
 
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash
 from app import app, db
 from models import User, Student, Course, Attendance, Fingerprint
@@ -204,7 +204,7 @@ def create_sample_attendance():
         students = Student.query.all()
         
         # For the past 14 days
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()  # Updated to use timezone-aware datetime
         for day_offset in range(14, 0, -1):  # Past 14 days, excluding today
             date = today - timedelta(days=day_offset)
             # Only add records for weekdays (Monday=0, Sunday=6)

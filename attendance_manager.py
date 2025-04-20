@@ -3,7 +3,7 @@ import json
 import random
 from datetime import datetime
 from models import Attendance, Student, Course
-from app import db
+from extensions import db
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class AttendanceManager:
             # Check if student is enrolled in the course
             if course not in student.courses:
                 logger.warning(f"Student {student.student_id} is not enrolled in course {course.course_code}")
-                # In a real system, you might want to handle this differently
+                return None  # Prevent attendance recording for non-enrolled students
             
             # Create new attendance record
             attendance = Attendance(

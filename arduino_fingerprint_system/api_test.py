@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 
 # Server URL - replace with your actual server URL
-SERVER_URL = "http://localhost:5000"
+SERVER_URL = "http://localhost:5432"
 
 # API endpoints
 COURSES_ENDPOINT = "/api/courses"

@@ -3,6 +3,9 @@ import time
 import random
 import json
 from datetime import datetime
+from extensions import db
+from app import app  # Import the Flask app
+from sqlalchemy import text  # Import text for raw SQL execution
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +22,17 @@ class FingerprintSensor:
         self.initialized = False
         self.enrolling = False
         self.enrollment_stage = 0
-        self.stored_templates = {}  # In a real system, these would be stored in a database
+
+        # Use the application context to execute database operations
+        with app.app_context():
+            with db.engine.connect() as connection:
+                connection.execute(text('''
+                    CREATE TABLE IF NOT EXISTS templates (
+                    id SERIAL PRIMARY KEY,
+                    student_id INTEGER NOT NULL,
+                    template_data BYTEA NOT NULL
+                    )
+                '''))
         
         # Simulation state
         self._simulation_state = {

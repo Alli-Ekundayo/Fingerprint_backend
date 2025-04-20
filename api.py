@@ -2,7 +2,7 @@ import logging
 from flask import jsonify, request, Blueprint
 from flask_login import login_required
 from models import Attendance, Student, Course
-from app import db
+from extensions import db
 from datetime import datetime
 from utils import json_response
 
@@ -130,6 +130,16 @@ def record_attendance():
         course = Course.query.get(data['course_id'])
         if not course:
             return json_response({"error": "Course not found", "course_id": str(data['course_id'])}, 404)
+            
+        # Check if student is enrolled in the course
+        if course not in student.courses:
+            return json_response({
+                "error": "Student is not enrolled in this course",
+                "student_id": str(student_id_value),
+                "course_id": str(data['course_id']),
+                "student_name": f"{student.first_name} {student.last_name}",
+                "course_name": course.title
+            }, 403)
             
         # Get timestamp (default to current time if not provided)
         if 'timestamp' in data and data['timestamp']:
@@ -300,7 +310,16 @@ def verify_fingerprint():
         # Get the student associated with the fingerprint
         student = Student.query.get(fingerprint.student_id)
         
-        # Return student information
+        # Get courses the student is enrolled in
+        enrolled_courses = []
+        for course in student.courses:
+            enrolled_courses.append({
+                'id': course.id,
+                'code': course.course_code,
+                'title': course.title
+            })
+        
+        # Return student information with enrolled courses
         return jsonify({
             "success": True,
             "message": "Fingerprint verified",
@@ -308,7 +327,8 @@ def verify_fingerprint():
                 "id": student.id,
                 "student_id": student.student_id,
                 "name": f"{student.first_name} {student.last_name}",
-                "fingerprint_id": fingerprint.finger_id
+                "fingerprint_id": fingerprint.finger_id,
+                "enrolled_courses": enrolled_courses
             }
         })
         
