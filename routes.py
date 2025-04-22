@@ -234,6 +234,7 @@ def register_routes(app):
             
         return render_template('students.html', title='Edit Student', form=form, student=student)
     
+    @csrf.exempt
     @app.route('/students/delete/<int:id>', methods=['POST'])
     @login_required
     def delete_student(id):
@@ -379,7 +380,8 @@ def register_routes(app):
         
         return render_template('course_attendance.html', title=f'Attendance - {course.course_code}',
                               course=course, grouped_records=grouped_records)
-                              
+     
+    @csrf.exempt                         
     @app.route('/courses/delete/<int:id>', methods=['POST'])
     @login_required
     def delete_course(id):
