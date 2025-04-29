@@ -9,7 +9,7 @@ from forms import (
     LoginForm, RegistrationForm, StudentForm, CourseForm, EnrollmentForm, 
     FingerprintEnrollForm, AttendanceForm, SearchForm
 )
-from fingerprint_sensor import FingerprintSensor
+from fingerprint_sensor_module import FingerprintSensor
 from attendance_manager import AttendanceManager
 
 logger = logging.getLogger(__name__)
