@@ -1,450 +1,572 @@
-
-#include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
+#include <WiFi.h>
+#include <WiFiMulti.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_Fingerprint.h>
-#include <ArduinoJson.h>
-#include <SoftwareSerial.h>
+#include <time.h>
+#include <SPIFFS.h>
+#include <WebServer.h>
+
+// Pin Definitions
+#define FINGERPRINT_RX 16
+#define FINGERPRINT_TX 17
+#define LED_GREEN 25
+#define LED_YELLOW 26
+#define LED_RED 27
+#define BTN_SELECT 12
+#define BTN_UP 13
+#define BTN_DOWN 14
+#define BTN_BACK 15
+
+// Configuration
+#define LCD_COLS 16
+#define LCD_ROWS 2
+#define LCD_ADDRESS 0x27
+#define SERVER_URL "http://192.168.43.164:5000"
+#define MAX_OFFLINE_RECORDS 50
+#define NTP_SERVER "pool.ntp.org"
 
 // WiFi credentials
-const char* WIFI_SSID = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
 
-// Server API endpoints
-const char* SERVER_URL = "http://your-server-url.com";
-const char* COURSES_ENDPOINT = "/api/courses";
-const char* VERIFY_FINGERPRINT_ENDPOINT = "/api/verify-fingerprint";
-const char* ATTENDANCE_ENDPOINT = "/api/attendance";
+// Initialize the web server on port 80
+WebServer server(80);
 
-// Hardware pins
-#define FINGERPRINT_RX 2  // Connect to TX on fingerprint sensor
-#define FINGERPRINT_TX 3  // Connect to RX on fingerprint sensor
-#define SELECT_BTN 5
-#define UP_BTN 6
-#define DOWN_BTN 7
-#define BACK_BTN 8
-#define GREEN_LED 9
-#define RED_LED 10
-#define YELLOW_LED 11
-
-// System state definitions
+// State Machine States
 enum SystemState {
-  STATE_INIT,
-  STATE_CONNECT_WIFI,
-  STATE_FETCH_COURSES,
-  STATE_SELECT_COURSE,
-  STATE_WAIT_FINGERPRINT,
-  STATE_SCANNING_FINGERPRINT,
-  STATE_VERIFY_FINGERPRINT,
-  STATE_RECORD_ATTENDANCE,
-  STATE_SHOW_RESULT,
-  STATE_ERROR
+  INIT,
+  CONNECT_WIFI,
+  FETCH_COURSES,
+  SELECT_COURSE,
+  WAIT_FINGERPRINT,
+  SCAN_FINGERPRINT,
+  VERIFY_FINGERPRINT,
+  RECORD_ATTENDANCE,
+  SHOW_RESULT,
+  SYNC_OFFLINE
 };
 
-// Global variables
-SystemState currentState = STATE_INIT;
-LiquidCrystal_I2C lcd(0x27, 16, 2);  // I2C address 0x27, 16 columns and 2 rows
-SoftwareSerial fingerprintSerial(FINGERPRINT_RX, FINGERPRINT_TX);
-Adafruit_Fingerprint fingerprintSensor = Adafruit_Fingerprint(&fingerprintSerial);
+// Global Variables
+SystemState currentState = INIT;
+WiFiMulti wifiMulti;
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
+// Use HardwareSerial2 for fingerprint sensor
+HardwareSerial fingerprintSerial(2);  // UART2 on ESP32
+Adafruit_Fingerprint fingerSensor = Adafruit_Fingerprint(&fingerprintSerial);
 
-// Course data
+// Course and attendance related variables
 struct Course {
-  int id;
-  String code;
+  String id;
   String title;
+  String code;
 };
 
-Course courses[10];  // Store up to 10 courses
-int courseCount = 0;
-int selectedCourseIndex = 0;
-
-// Student data
-struct Student {
-  int id;
-  String studentId;
-  String name;
-};
-
-Student currentStudent;
-
-// Attendance data for offline storage
 struct AttendanceRecord {
-  int studentId;
-  int courseId;
-  String status;
-  String timestamp;
+  String courseId;
+  uint32_t fingerprintId;
+  time_t timestamp;
   bool synced;
 };
 
-AttendanceRecord offlineRecords[50];  // Store up to 50 offline records
+Course courses[10];  // Maximum 10 courses support
+int courseCount = 0;
+int selectedCourseIndex = 0;
+AttendanceRecord offlineBuffer[MAX_OFFLINE_RECORDS];
 int offlineRecordCount = 0;
+uint32_t lastButtonPressTime = 0;
+const uint32_t debounceDelay = 200;  // Debounce delay in ms
 
-// Function prototypes
-bool connectToWiFi();
-bool fetchCourses();
-void showCourseSelection();
-void handleButtonPress();
-bool scanFingerprint();
-bool verifyFingerprint(int fingerprintId);
-bool recordAttendance(int studentId, int courseId);
-void syncOfflineRecords();
-void showMessage(String line1, String line2 = "");
-void blinkLED(int pin, int times, int delayMs);
+bool enrollmentInProgress = false;
+int enrollmentProgress = 0;
+uint8_t lastEnrollmentStatus = FINGERPRINT_NOFINGER;
 
 void setup() {
   // Initialize serial communication
   Serial.begin(115200);
-  Serial.println("\nIoT Fingerprint Attendance System");
-  
-  // Initialize hardware pins
-  pinMode(SELECT_BTN, INPUT_PULLUP);
-  pinMode(UP_BTN, INPUT_PULLUP);
-  pinMode(DOWN_BTN, INPUT_PULLUP);
-  pinMode(BACK_BTN, INPUT_PULLUP);
-  pinMode(GREEN_LED, OUTPUT);
-  pinMode(RED_LED, OUTPUT);
-  pinMode(YELLOW_LED, OUTPUT);
-  
-  // Turn on all LEDs briefly for testing
-  digitalWrite(GREEN_LED, HIGH);
-  digitalWrite(RED_LED, HIGH);
-  digitalWrite(YELLOW_LED, HIGH);
-  delay(500);
-  digitalWrite(GREEN_LED, LOW);
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(YELLOW_LED, LOW);
-  
+  Serial.println("Fingerprint Attendance System Starting...");
+
+  // Initialize SPIFFS for offline storage
+  if (!SPIFFS.begin(true)) {
+    Serial.println("Failed to mount SPIFFS");
+  }
+
+  // Set pin modes
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_YELLOW, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+  pinMode(BTN_SELECT, INPUT_PULLUP);
+  pinMode(BTN_UP, INPUT_PULLUP);
+  pinMode(BTN_DOWN, INPUT_PULLUP);
+  pinMode(BTN_BACK, INPUT_PULLUP);
+
+  // Initialize LEDs (all off)
+  digitalWrite(LED_GREEN, LOW);
+  digitalWrite(LED_YELLOW, LOW);
+  digitalWrite(LED_RED, LOW);
+
   // Initialize LCD
+  Wire.begin();
   lcd.init();
   lcd.backlight();
-  showMessage("Fingerprint", "Attendance System");
-  delay(2000);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Attendance System");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
+
+  // Initialize fingerprint sensor using hardware serial
+  fingerprintSerial.begin(57600, SERIAL_8N1, FINGERPRINT_RX, FINGERPRINT_TX);
   
-  // Initialize fingerprint sensor
-  fingerprintSerial.begin(57600);
-  
-  if (fingerprintSensor.verifyPassword()) {
-    showMessage("Fingerprint sensor", "detected");
-    Serial.println("Fingerprint sensor found");
+  if (fingerSensor.verifyPassword()) {
+    Serial.println("Fingerprint sensor connected!");
   } else {
-    showMessage("Fingerprint sensor", "not found!");
     Serial.println("Fingerprint sensor not found");
-    currentState = STATE_ERROR;
-    return;
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Sensor Error!");
+    digitalWrite(LED_RED, HIGH);
+    delay(2000);
   }
+
+  // Initialize WiFi in station mode
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();  // Disconnect from any previous connections
+  delay(100);
+
+  Serial.println("Scanning for WiFi networks...");
+  int n = WiFi.scanNetworks();
+  if (n == 0) {
+    Serial.println("No networks found");
+  } else {
+    Serial.print(n);
+    Serial.println(" networks found");
+    for (int i = 0; i < n; ++i) {
+      Serial.printf("%d: %s (Signal: %d dBm)\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+      delay(10);
+    }
+  }
+
+  // Configure WiFi networks (make sure these match your network)
+  wifiMulti.addAP("HUAWEI P smart 2019", "123456789012");  // Primary network
+
+  // Set WiFi connection timeout
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
   
-  // Start with connecting to WiFi
-  currentState = STATE_CONNECT_WIFI;
+  // Configure NTP
+  configTime(0, 0, NTP_SERVER);  // UTC time, no DST offset
+
+  // Load any existing offline records
+  loadOfflineRecords();
+  
+  // Initial state
+  currentState = CONNECT_WIFI;
+
+  // Set up HTTP endpoints
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/init", HTTP_POST, handleInit);
+  server.on("/enroll", HTTP_POST, handleEnroll);
+  server.on("/verify", HTTP_POST, handleVerify);
+  server.on("/delete", HTTP_POST, handleDelete);
+  server.on("/template-count", HTTP_GET, handleTemplateCount);
+  server.on("/start-enrollment", HTTP_POST, handleStartEnrollment);
+  server.on("/enrollment-status", HTTP_GET, handleEnrollmentStatus);
+
+  server.begin();
 }
 
-void loop() {
-  // State machine for the system
-  switch (currentState) {
-    case STATE_INIT:
-      // Initialize the system
-      showMessage("Initializing...");
-      delay(1000);
-      currentState = STATE_CONNECT_WIFI;
-      break;
-      
-    case STATE_CONNECT_WIFI:
-      // Connect to WiFi network
-      showMessage("Connecting to", WIFI_SSID);
-      
-      if (connectToWiFi()) {
-        showMessage("Connected!", "Fetching courses...");
-        currentState = STATE_FETCH_COURSES;
-      } else {
-        showMessage("WiFi connection", "failed!");
-        digitalWrite(RED_LED, HIGH);
-        delay(3000);
-        digitalWrite(RED_LED, LOW);
-        // Retry after a delay
-        delay(5000);
-      }
-      break;
-      
-    case STATE_FETCH_COURSES:
-      // Fetch available courses
-      if (fetchCourses()) {
-        showMessage("Courses loaded", String(courseCount) + " available");
-        delay(1000);
-        currentState = STATE_SELECT_COURSE;
-      } else {
-        showMessage("Failed to fetch", "courses!");
-        digitalWrite(RED_LED, HIGH);
-        delay(3000);
-        digitalWrite(RED_LED, LOW);
-        // Retry after a delay
-        delay(5000);
-      }
-      break;
-      
-    case STATE_SELECT_COURSE:
-      // Show course selection interface
-      showCourseSelection();
-      // Handle button presses for selection
-      handleButtonPress();
-      break;
-      
-    case STATE_WAIT_FINGERPRINT:
-      // Wait for finger placement
-      showMessage("Place finger on", "the sensor");
-      digitalWrite(YELLOW_LED, HIGH);
-      
-      // Check if finger is placed
-      if (fingerprintSensor.getImage() == FINGERPRINT_OK) {
-        digitalWrite(YELLOW_LED, LOW);
-        showMessage("Finger detected", "Scanning...");
-        currentState = STATE_SCANNING_FINGERPRINT;
-      }
-      break;
-      
-    case STATE_SCANNING_FINGERPRINT:
-      // Scan the fingerprint
-      if (scanFingerprint()) {
-        showMessage("Scan successful", "Verifying...");
-        currentState = STATE_VERIFY_FINGERPRINT;
-      } else {
-        showMessage("Scan failed!", "Try again");
-        digitalWrite(RED_LED, HIGH);
-        delay(1000);
-        digitalWrite(RED_LED, LOW);
-        currentState = STATE_WAIT_FINGERPRINT;
-      }
-      break;
-      
-    case STATE_VERIFY_FINGERPRINT:
-      // Verify the fingerprint against the database
-      if (verifyFingerprint(1)) {  // Use fingerprint ID 1 for testing
-        showMessage("Verified: " + currentStudent.name, "Recording...");
-        currentState = STATE_RECORD_ATTENDANCE;
-      } else {
-        showMessage("Verification", "failed!");
-        digitalWrite(RED_LED, HIGH);
-        delay(2000);
-        digitalWrite(RED_LED, LOW);
-        currentState = STATE_WAIT_FINGERPRINT;
-      }
-      break;
-      
-    case STATE_RECORD_ATTENDANCE:
-      // Record attendance for the verified student
-      if (recordAttendance(currentStudent.id, courses[selectedCourseIndex].id)) {
-        showMessage("Attendance", "recorded!");
-        digitalWrite(GREEN_LED, HIGH);
-        delay(2000);
-        digitalWrite(GREEN_LED, LOW);
-      } else {
-        // Store locally if server is unavailable
-        showMessage("Stored locally", "Will sync later");
-        digitalWrite(YELLOW_LED, HIGH);
-        delay(2000);
-        digitalWrite(YELLOW_LED, LOW);
-        
-        // Add to offline storage
-        if (offlineRecordCount < 50) {
-          offlineRecords[offlineRecordCount].studentId = currentStudent.id;
-          offlineRecords[offlineRecordCount].courseId = courses[selectedCourseIndex].id;
-          offlineRecords[offlineRecordCount].status = "present";
-          // TODO: Get real timestamp
-          offlineRecords[offlineRecordCount].timestamp = "2025-04-05T12:00:00";
-          offlineRecords[offlineRecordCount].synced = false;
-          offlineRecordCount++;
-        }
-      }
-      currentState = STATE_SHOW_RESULT;
-      break;
-      
-    case STATE_SHOW_RESULT:
-      // Show result briefly, then go back to waiting for fingerprint
-      delay(2000);
-      showMessage(courses[selectedCourseIndex].code, "Scan next finger");
-      currentState = STATE_WAIT_FINGERPRINT;
-      
-      // Try to sync offline records periodically
-      if (offlineRecordCount > 0 && WiFi.status() == WL_CONNECTED) {
-        syncOfflineRecords();
-      }
-      break;
-      
-    case STATE_ERROR:
-      // Error state - blink red LED
-      showMessage("System Error", "Check connections");
-      blinkLED(RED_LED, 3, 300);
-      delay(2000);
-      break;
-  }
-}
-
-// Connect to WiFi network
-bool connectToWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return true;
+/**
+ * Handles WiFi connection with timeout and visual feedback
+ */
+void handleWiFiConnection() {
+  static uint32_t connectionStartTime = 0;
+  const uint32_t connectionTimeout = 30000;  // 30 seconds
+  
+  // First entry to this state
+  if (connectionStartTime == 0) {
+    Serial.println("Connecting to WiFi...");
+    connectionStartTime = millis();
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Connecting WiFi");
+    digitalWrite(LED_YELLOW, HIGH);
   }
   
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  
-  // Wait for connection with timeout
-  int timeout = 20;  // 10 seconds
-  while (WiFi.status() != WL_CONNECTED && timeout > 0) {
-    delay(500);
-    Serial.print(".");
-    timeout--;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected");
+  // Check if connected
+  if (wifiMulti.run() == WL_CONNECTED) {
+    Serial.println("WiFi connected!");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
-    return true;
-  } else {
-    Serial.println("\nWiFi connection failed");
-    return false;
-  }
-}
-
-// Fetch available courses from the server
-bool fetchCourses() {
-  if (WiFi.status() != WL_CONNECTED) {
-    return false;
-  }
-  
-  HTTPClient http;
-  String url = String(SERVER_URL) + String(COURSES_ENDPOINT);
-  
-  http.begin(url);
-  int httpCode = http.GET();
-  
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    Serial.println("Courses API response:");
-    Serial.println(payload);
     
-    // Parse JSON response
-    DynamicJsonDocument doc(2048);
-    DeserializationError error = deserializeJson(doc, payload);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Connected");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
     
-    if (error) {
-      Serial.print("JSON parsing failed: ");
-      Serial.println(error.c_str());
-      http.end();
-      return false;
-    }
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(LED_GREEN, HIGH);
+    delay(1000);
+    digitalWrite(LED_GREEN, LOW);
     
-    // Extract courses
-    JsonArray coursesArray = doc["courses"];
-    courseCount = min((int)coursesArray.size(), 10);
+    // Sync time with NTP server
+    configTime(0, 0, NTP_SERVER);
     
-    for (int i = 0; i < courseCount; i++) {
-      courses[i].id = coursesArray[i]["id"];
-      courses[i].code = coursesArray[i]["code"].as<String>();
-      courses[i].title = coursesArray[i]["title"].as<String>();
-    }
-    
-    http.end();
-    return true;
-  } else {
-    Serial.print("HTTP GET failed, error: ");
-    Serial.println(httpCode);
-    http.end();
-    return false;
-  }
-}
-
-// Display course selection interface
-void showCourseSelection() {
-  if (courseCount == 0) {
-    showMessage("No courses", "available");
+    currentState = FETCH_COURSES;
+    connectionStartTime = 0;  // Reset for next time
     return;
   }
   
-  String line1 = String(selectedCourseIndex + 1) + "/" + String(courseCount) + " " + courses[selectedCourseIndex].code;
-  String line2 = courses[selectedCourseIndex].title;
-  
-  // Truncate if too long
-  if (line2.length() > 16) {
-    line2 = line2.substring(0, 13) + "...";
-  }
-  
-  showMessage(line1, line2);
-}
-
-// Handle button presses for course selection
-void handleButtonPress() {
-  // Check SELECT button
-  if (digitalRead(SELECT_BTN) == LOW) {
-    delay(50);  // Debounce
-    if (digitalRead(SELECT_BTN) == LOW) {
-      // Course selected, wait for fingerprint
-      showMessage("Selected: " + courses[selectedCourseIndex].code, "Place finger");
-      currentState = STATE_WAIT_FINGERPRINT;
-      delay(500);  // Prevent multiple presses
-      while (digitalRead(SELECT_BTN) == LOW) {
-        // Wait for button release
-        delay(10);
-      }
+  // Check for timeout
+  if (millis() - connectionStartTime > connectionTimeout) {
+    Serial.println("WiFi connection timeout");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Failed");
+    lcd.setCursor(0, 1);
+    lcd.print("Using Offline");
+    
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(LED_RED, HIGH);
+    delay(1000);
+    digitalWrite(LED_RED, LOW);
+    
+    // Skip to course selection with cached data
+    if (courseCount > 0) {
+      currentState = SELECT_COURSE;
+    } else {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("No cached data");
+      lcd.setCursor(0, 1);
+      lcd.print("Retrying WiFi...");
+      delay(2000);
+      // Will retry WiFi connection
     }
-  }
-  
-  // Check UP button
-  if (digitalRead(UP_BTN) == LOW) {
-    delay(50);  // Debounce
-    if (digitalRead(UP_BTN) == LOW) {
-      // Move to previous course
-      if (selectedCourseIndex > 0) {
-        selectedCourseIndex--;
-      } else {
-        selectedCourseIndex = courseCount - 1;  // Wrap around
-      }
-      showCourseSelection();
-      delay(300);  // Prevent multiple presses
-    }
-  }
-  
-  // Check DOWN button
-  if (digitalRead(DOWN_BTN) == LOW) {
-    delay(50);  // Debounce
-    if (digitalRead(DOWN_BTN) == LOW) {
-      // Move to next course
-      selectedCourseIndex = (selectedCourseIndex + 1) % courseCount;
-      showCourseSelection();
-      delay(300);  // Prevent multiple presses
-    }
-  }
-  
-  // Check BACK button
-  if (digitalRead(BACK_BTN) == LOW) {
-    delay(50);  // Debounce
-    if (digitalRead(BACK_BTN) == LOW) {
-      // Go back to course fetching
-      currentState = STATE_FETCH_COURSES;
-      delay(500);  // Prevent multiple presses
-    }
+    connectionStartTime = 0;  // Reset for next time
+  } else {
+    // Visual feedback during connection
+    lcd.setCursor(0, 1);
+    lcd.print("                ");  // Clear second line
+    lcd.setCursor(0, 1);
+    lcd.print("Trying... ");
+    lcd.print((millis() - connectionStartTime) / 1000);
+    lcd.print("s");
+    delay(200);
   }
 }
 
-// Scan fingerprint and extract features
-bool scanFingerprint() {
-  uint8_t p = fingerprintSensor.image2Tz();
-  if (p != FINGERPRINT_OK) {
-    Serial.print("Image conversion failed, status: ");
-    Serial.println(p);
-    return false;
-  }
+/**
+ * Fetches course list from server via HTTP
+ */
+bool fetchCourseList() {
+  digitalWrite(LED_YELLOW, HIGH);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Fetching courses");
   
-  return true;
-}
-
-// Verify fingerprint with the server
-bool verifyFingerprint(int fingerprintId) {
   if (WiFi.status() != WL_CONNECTED) {
-    return false;
+    Serial.println("WiFi disconnected, cannot fetch courses");
+    handleFetchError("No WiFi");
+    
+    // Try to load cached course data
+    if (loadCourseData()) {
+      currentState = SELECT_COURSE;
+    }
+    return true;
+  }
+
+  HTTPClient http;
+  String url = String(SERVER_URL) + "/api/courses";
+  
+  Serial.print("Connecting to: ");
+  Serial.println(url);
+  
+  http.begin(url);
+  http.setTimeout(15000); // 15 second timeout
+  int httpCode = http.GET();
+
+  // httpCode will be negative on error
+  if (httpCode > 0) {
+    Serial.print("HTTP response code: ");
+    Serial.println(httpCode);
+    
+    // HTTP 200 OK
+    if (httpCode == HTTP_CODE_OK) {
+      String payload = http.getString();
+      Serial.println("Courses API response received:");
+      Serial.println(payload);
+      
+      // Parse JSON response
+      DynamicJsonDocument doc(2048);
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (error) {
+        Serial.print("JSON parsing failed: ");
+        Serial.println(error.c_str());
+        http.end();
+        handleFetchError("JSON Error");
+        return false;
+      }
+      
+      // Check if response contains courses array
+      if (!doc.containsKey("courses")) {
+        Serial.println("Error: Response missing 'courses' array");
+        http.end();
+        handleFetchError("Invalid Data");
+        return false;
+      }
+      
+      // Extract courses
+      JsonArray coursesArray = doc["courses"];
+      courseCount = min((int)coursesArray.size(), 10);
+      
+      Serial.print("Found ");
+      Serial.print(courseCount);
+      Serial.println(" courses");
+      
+      for (int i = 0; i < courseCount; i++) {
+        courses[i].id = coursesArray[i]["id"].as<String>();
+        courses[i].code = coursesArray[i]["code"].as<String>();
+        courses[i].title = coursesArray[i]["title"].as<String>();
+        
+        Serial.print("Course ");
+        Serial.print(i + 1);
+        Serial.print(": ");
+        Serial.print(courses[i].code);
+        Serial.print(" - ");
+        Serial.println(courses[i].title);
+      }
+      
+      // Save courses for offline use
+      saveCourseData();
+      
+      // Turn off yellow LED and show success briefly
+      digitalWrite(LED_YELLOW, LOW);
+      digitalWrite(LED_GREEN, HIGH);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Found ");
+      lcd.print(courseCount);
+      lcd.print(" courses");
+      delay(1000);
+      digitalWrite(LED_GREEN, LOW);
+      
+      // Transition to course selection
+      currentState = SELECT_COURSE;
+      
+      http.end();
+      return true;
+    } else {
+      // Other HTTP error codes
+      Serial.print("HTTP GET returned error code: ");
+      Serial.println(httpCode);
+      String payload = http.getString();
+      Serial.print("Server response: ");
+      Serial.println(payload);
+      handleFetchError("HTTP " + String(httpCode));
+    }
+  } else {
+    Serial.print("HTTP connection failed with error: ");
+    Serial.println(http.errorToString(httpCode));
+    handleFetchError("Conn Failed");
   }
   
+  http.end();
+  return false;
+}
+
+/**
+ * Handles error during course fetch
+ */
+void handleFetchError(String errorMsg) {
+  digitalWrite(LED_YELLOW, LOW);
+  digitalWrite(LED_RED, HIGH);
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Fetch Error!");
+  lcd.setCursor(0, 1);
+  lcd.print(errorMsg);
+  
+  delay(2000);
+  digitalWrite(LED_RED, LOW);
+}
+
+/**
+ * Handles course selection interface on LCD
+ */
+void handleCourseSelection() {
+  static bool firstEntry = true;
+  
+  if (firstEntry) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Select Course:");
+    displayCourse();
+    firstEntry = false;
+  }
+  
+  // Button handling is in the handleButtonInputs() function
+  // This function mainly handles display updates
+  
+  if (digitalRead(BTN_SELECT) == LOW && millis() - lastButtonPressTime > debounceDelay) {
+    lastButtonPressTime = millis();
+    firstEntry = true;  // Reset for next time
+    currentState = WAIT_FINGERPRINT;
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Selected:");
+    lcd.setCursor(0, 1);
+    lcd.print(courses[selectedCourseIndex].title);
+    delay(1000);
+  }
+}
+
+/**
+ * Displays current course in the selection
+ */
+void displayCourse() {
+  lcd.setCursor(0, 1);
+  lcd.print("                ");  // Clear line
+  lcd.setCursor(0, 1);
+  
+  String courseName = courses[selectedCourseIndex].title;
+  if (courseName.length() > 16) {
+    courseName = courseName.substring(0, 13) + "...";
+  }
+  
+  lcd.print(courseName);
+}
+
+/**
+ * Wait for a finger to be placed on the sensor
+ */
+void waitForFingerprint() {
+  static bool firstEntry = true;
+  static unsigned long animationTimer = 0;
+  static int animationState = 0;
+  
+  if (firstEntry) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Place finger");
+    lcd.setCursor(0, 1);
+    lcd.print("on sensor");
+    digitalWrite(LED_YELLOW, HIGH);
+    firstEntry = false;
+    animationTimer = millis();
+  }
+  
+  // Simple animation for visual feedback
+  if (millis() - animationTimer > 500) {
+    animationTimer = millis();
+    lcd.setCursor(15, 0);
+    lcd.print(animationState % 2 == 0 ? ">" : " ");
+    animationState++;
+  }
+  
+  // Check if finger is present
+  uint8_t p = fingerSensor.getImage();
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Image taken");
+    digitalWrite(LED_YELLOW, LOW);
+    firstEntry = true;  // Reset for next time
+    currentState = SCAN_FINGERPRINT;
+  } else if (digitalRead(BTN_BACK) == LOW && millis() - lastButtonPressTime > debounceDelay) {
+    lastButtonPressTime = millis();
+    digitalWrite(LED_YELLOW, LOW);
+    firstEntry = true;  // Reset for next time
+    currentState = SELECT_COURSE;
+  }
+}
+
+/**
+ * Process fingerprint scan and convert to template
+ */
+void scanFingerprint() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Processing...");
+  digitalWrite(LED_YELLOW, HIGH);
+  
+  // Convert fingerprint image to characteristics
+  uint8_t p = fingerSensor.image2Tz();
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Image converted");
+    currentState = VERIFY_FINGERPRINT;
+  } else {
+    Serial.print("Image conversion error: ");
+    Serial.println(p);
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Scan error!");
+    lcd.setCursor(0, 1);
+    lcd.print("Try again");
+    
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(LED_RED, HIGH);
+    delay(2000);
+    digitalWrite(LED_RED, LOW);
+    
+    currentState = WAIT_FINGERPRINT;
+  }
+}
+
+/**
+ * Verify fingerprint against stored templates
+ */
+void verifyFingerprint() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Verifying...");
+  
+  uint8_t p = fingerSensor.fingerFastSearch();
+  
+  if (p == FINGERPRINT_OK) {
+    // Found a match
+    uint32_t fingerprintId = fingerSensor.fingerID;
+    uint16_t confidence = fingerSensor.confidence;
+    
+    Serial.print("Found ID #"); Serial.print(fingerprintId);
+    Serial.print(" with confidence of "); Serial.println(confidence);
+    
+    // If online, verify with server
+    if (WiFi.status() == WL_CONNECTED) {
+      verifyWithServer(fingerprintId);
+    } else {
+      // Skip online verification if offline
+      currentState = RECORD_ATTENDANCE;
+    }
+  } else {
+    // No match found
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("No match found!");
+    lcd.setCursor(0, 1);
+    lcd.print("Try again");
+    
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(LED_RED, HIGH);
+    delay(2000);
+    digitalWrite(LED_RED, LOW);
+    
+    currentState = WAIT_FINGERPRINT;
+  }
+}
+
+/**
+ * Verify fingerprint validity with server
+ */
+void verifyWithServer(uint32_t fingerprintId) {
   HTTPClient http;
-  String url = String(SERVER_URL) + String(VERIFY_FINGERPRINT_ENDPOINT);
+  String url = String(SERVER_URL) + "/api/verify-fingerprint";
   
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
@@ -452,155 +574,639 @@ bool verifyFingerprint(int fingerprintId) {
   // Create JSON payload
   DynamicJsonDocument doc(256);
   doc["fingerprint_id"] = fingerprintId;
+  doc["course_id"] = courses[selectedCourseIndex].id;
   
-  String requestBody;
-  serializeJson(doc, requestBody);
+  String payload;
+  serializeJson(doc, payload);
   
-  int httpCode = http.POST(requestBody);
+  int httpCode = http.POST(payload);
   
   if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    Serial.println("Verify Fingerprint API response:");
-    Serial.println(payload);
-    
-    // Parse JSON response
-    DynamicJsonDocument responseDoc(1024);
-    DeserializationError error = deserializeJson(responseDoc, payload);
-    
-    if (error) {
-      Serial.print("JSON parsing failed: ");
-      Serial.println(error.c_str());
-      http.end();
-      return false;
-    }
-    
-    // Check if verification was successful
-    bool success = responseDoc["success"];
-    
-    if (success) {
-      // Extract student information
-      JsonObject student = responseDoc["student"];
-      currentStudent.id = student["id"];
-      currentStudent.studentId = student["student_id"].as<String>();
-      currentStudent.name = student["name"].as<String>();
-      
-      http.end();
-      return true;
-    } else {
-      http.end();
-      return false;
-    }
+    // Server verification successful
+    currentState = RECORD_ATTENDANCE;
   } else {
-    Serial.print("HTTP POST failed, error: ");
-    Serial.println(httpCode);
-    http.end();
-    return false;
-  }
-}
-
-// Record attendance for a student
-bool recordAttendance(int studentId, int courseId) {
-  if (WiFi.status() != WL_CONNECTED) {
-    return false;
+    // Server verification failed
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Server verify");
+    lcd.setCursor(0, 1);
+    lcd.print("failed: ");
+    lcd.print(httpCode);
+    
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(LED_RED, HIGH);
+    delay(2000);
+    digitalWrite(LED_RED, LOW);
+    
+    // Continue to attendance recording anyway, but mark as offline
+    currentState = RECORD_ATTENDANCE;
   }
   
+  http.end();
+}
+
+/**
+ * Record attendance locally and attempt to sync with server
+ */
+void recordAttendance() {
+  time_t now;
+  time(&now);  // Get current time
+  
+  uint32_t fingerprintId = fingerSensor.fingerID;
+  String courseId = courses[selectedCourseIndex].id;
+  
+  // Attempt to record attendance online
+  bool syncSuccessful = false;
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    syncSuccessful = sendAttendanceToServer(fingerprintId, courseId, now);
+  }
+  
+  if (!syncSuccessful) {
+    // Store in offline buffer
+    if (offlineRecordCount < MAX_OFFLINE_RECORDS) {
+      offlineBuffer[offlineRecordCount].courseId = courseId;
+      offlineBuffer[offlineRecordCount].fingerprintId = fingerprintId;
+      offlineBuffer[offlineRecordCount].timestamp = now;
+      offlineBuffer[offlineRecordCount].synced = false;
+      offlineRecordCount++;
+      
+      // Save to persistent storage
+      saveOfflineRecords();
+    } else {
+      // Buffer full warning
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Warning:");
+      lcd.setCursor(0, 1);
+      lcd.print("Buffer full!");
+      
+      digitalWrite(LED_RED, HIGH);
+      delay(1000);
+      digitalWrite(LED_RED, LOW);
+    }
+  }
+  
+  currentState = SHOW_RESULT;
+}
+
+/**
+ * Attempt to send attendance record to server
+ */
+bool sendAttendanceToServer(uint32_t fingerprintId, String courseId, time_t timestamp) {
   HTTPClient http;
-  String url = String(SERVER_URL) + String(ATTENDANCE_ENDPOINT);
+  String url = String(SERVER_URL) + "api/attendance";
   
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   
   // Create JSON payload
   DynamicJsonDocument doc(256);
-  doc["student_id"] = studentId;
+  doc["fingerprint_id"] = fingerprintId;
   doc["course_id"] = courseId;
-  doc["status"] = "present";
-  // In a real implementation, you'd use NTP to get accurate time
-  doc["timestamp"] = "2025-04-05T12:00:00";
+  doc["timestamp"] = timestamp;
   
-  String requestBody;
-  serializeJson(doc, requestBody);
+  String payload;
+  serializeJson(doc, payload);
   
-  int httpCode = http.POST(requestBody);
+  int httpCode = http.POST(payload);
   
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    Serial.println("Record Attendance API response:");
-    Serial.println(payload);
-    
-    // Parse JSON response
-    DynamicJsonDocument responseDoc(256);
-    DeserializationError error = deserializeJson(responseDoc, payload);
-    
-    if (error) {
-      Serial.print("JSON parsing failed: ");
-      Serial.println(error.c_str());
-      http.end();
-      return false;
-    }
-    
-    // Check if recording was successful
-    bool success = responseDoc["success"];
-    
-    http.end();
-    return success;
+  http.end();
+  return (httpCode == HTTP_CODE_OK);
+}
+
+/**
+ * Display attendance recording result
+ */
+void showResult() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Attendance");
+  lcd.setCursor(0, 1);
+  lcd.print("Recorded!");
+  
+  digitalWrite(LED_GREEN, HIGH);
+  delay(2000);
+  digitalWrite(LED_GREEN, LOW);
+  
+  // Check if we need to sync offline records
+  if (WiFi.status() == WL_CONNECTED && offlineRecordCount > 0) {
+    currentState = SYNC_OFFLINE;
   } else {
-    Serial.print("HTTP POST failed, error: ");
-    Serial.println(httpCode);
-    http.end();
-    return false;
+    currentState = SELECT_COURSE;
   }
 }
 
-// Sync offline attendance records
+/**
+ * Sync offline attendance records with server
+ */
 void syncOfflineRecords() {
-  if (WiFi.status() != WL_CONNECTED || offlineRecordCount == 0) {
+  static int currentSyncIndex = 0;
+  
+  if (currentSyncIndex == 0) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Syncing offline");
+    lcd.setCursor(0, 1);
+    lcd.print("records: 0/");
+    lcd.print(offlineRecordCount);
+    
+    digitalWrite(LED_YELLOW, HIGH);
+  }
+  
+  if (currentSyncIndex < offlineRecordCount) {
+    if (!offlineBuffer[currentSyncIndex].synced) {
+      bool success = sendAttendanceToServer(
+        offlineBuffer[currentSyncIndex].fingerprintId,
+        offlineBuffer[currentSyncIndex].courseId,
+        offlineBuffer[currentSyncIndex].timestamp
+      );
+      
+      if (success) {
+        offlineBuffer[currentSyncIndex].synced = true;
+        saveOfflineRecords();
+      }
+    }
+    
+    // Update display
+    lcd.setCursor(9, 1);
+    lcd.print(currentSyncIndex + 1);
+    
+    currentSyncIndex++;
+  } else {
+    // Cleanup synced records
+    int newCount = 0;
+    for (int i = 0; i < offlineRecordCount; i++) {
+      if (!offlineBuffer[i].synced) {
+        if (i != newCount) {
+          offlineBuffer[newCount] = offlineBuffer[i];
+        }
+        newCount++;
+      }
+    }
+    
+    offlineRecordCount = newCount;
+    saveOfflineRecords();
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Sync complete");
+    lcd.setCursor(0, 1);
+    lcd.print(offlineRecordCount);
+    lcd.print(" records left");
+    
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(LED_GREEN, HIGH);
+    delay(2000);
+    digitalWrite(LED_GREEN, LOW);
+    
+    currentSyncIndex = 0;  // Reset for next time
+    currentState = SELECT_COURSE;
+  }
+}
+
+/**
+ * Handle button inputs for navigation
+ */
+void handleButtonInputs() {
+  // UP button - navigate through menus
+  if (digitalRead(BTN_UP) == LOW && millis() - lastButtonPressTime > debounceDelay) {
+    lastButtonPressTime = millis();
+    
+    if (currentState == SELECT_COURSE) {
+      selectedCourseIndex = (selectedCourseIndex > 0) ? selectedCourseIndex - 1 : courseCount - 1;
+      displayCourse();
+    }
+  }
+  
+  // DOWN button - navigate through menus
+  if (digitalRead(BTN_DOWN) == LOW && millis() - lastButtonPressTime > debounceDelay) {
+    lastButtonPressTime = millis();
+    
+    if (currentState == SELECT_COURSE) {
+      selectedCourseIndex = (selectedCourseIndex < courseCount - 1) ? selectedCourseIndex + 1 : 0;
+      displayCourse();
+    }
+  }
+  
+  // BACK button - return to previous state
+  if (digitalRead(BTN_BACK) == LOW && millis() - lastButtonPressTime > debounceDelay) {
+    lastButtonPressTime = millis();
+    
+    switch (currentState) {
+      case SELECT_COURSE:
+        // If we have offline records and are online, offer to sync
+        if (WiFi.status() == WL_CONNECTED && offlineRecordCount > 0) {
+          currentState = SYNC_OFFLINE;
+        }
+        break;
+        
+      case WAIT_FINGERPRINT:
+        currentState = SELECT_COURSE;
+        break;
+        
+      default:
+        // Other states don't handle back button
+        break;
+    }
+  }
+}
+
+/**
+ * Save course data to SPIFFS for offline use
+ */
+void saveCourseData() {
+  File file = SPIFFS.open("/courses.json", "w");
+  if (!file) {
+    Serial.println("Failed to open courses file for writing");
     return;
   }
   
-  showMessage("Syncing offline", "records...");
-  digitalWrite(YELLOW_LED, HIGH);
+  DynamicJsonDocument doc(2048);
   
-  int syncCount = 0;
+  for (int i = 0; i < courseCount; i++) {
+    JsonObject course = doc.createNestedObject();
+    course["id"] = courses[i].id;
+    course["name"] = courses[i].title;
+  }
+  
+  if (serializeJson(doc, file) == 0) {
+    Serial.println("Failed to write courses to file");
+  }
+  
+  file.close();
+}
+
+/**
+ * Load cached course data from SPIFFS
+ */
+bool loadCourseData() {
+  if (!SPIFFS.exists("/courses.json")) {
+    return false;
+  }
+  
+  File file = SPIFFS.open("/courses.json", "r");
+  if (!file) {
+    Serial.println("Failed to open courses file for reading");
+    return false;
+  }
+  
+  DynamicJsonDocument doc(2048);
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  
+  if (error) {
+    Serial.println("Failed to parse courses file");
+    return false;
+  }
+  
+  courseCount = min((int)doc.size(), 10);
+  
+  for (int i = 0; i < courseCount; i++) {
+    courses[i].id = doc[i]["id"].as<String>();
+    courses[i].title = doc[i]["title"].as<String>();
+  }
+  
+  Serial.println("Loaded cached course data");
+  return true;
+}
+
+/**
+ * Save offline attendance records to SPIFFS
+ */
+void saveOfflineRecords() {
+  File file = SPIFFS.open("/attendance.json", "w");
+  if (!file) {
+    Serial.println("Failed to open attendance file for writing");
+    return;
+  }
+  
+  DynamicJsonDocument doc(4096);  // Adjust size as needed
   
   for (int i = 0; i < offlineRecordCount; i++) {
-    if (!offlineRecords[i].synced) {
-      // Try to sync this record
-      if (recordAttendance(offlineRecords[i].studentId, offlineRecords[i].courseId)) {
-        offlineRecords[i].synced = true;
-        syncCount++;
-      }
+    JsonObject record = doc.createNestedObject();
+    record["course_id"] = offlineBuffer[i].courseId;
+    record["fingerprint_id"] = offlineBuffer[i].fingerprintId;
+    record["timestamp"] = offlineBuffer[i].timestamp;
+    record["synced"] = offlineBuffer[i].synced;
+  }
+  
+  if (serializeJson(doc, file) == 0) {
+    Serial.println("Failed to write attendance to file");
+  }
+  
+  file.close();
+}
+
+/**
+ * Load offline attendance records from SPIFFS
+ */
+void loadOfflineRecords() {
+  if (!SPIFFS.exists("/attendance.json")) {
+    return;
+  }
+  
+  File file = SPIFFS.open("/attendance.json", "r");
+  if (!file) {
+    Serial.println("Failed to open attendance file for reading");
+    return;
+  }
+  
+  DynamicJsonDocument doc(4096);  // Adjust size as needed
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  
+  if (error) {
+    Serial.println("Failed to parse attendance file");
+    return;
+  }
+  
+  offlineRecordCount = min((int)doc.size(), MAX_OFFLINE_RECORDS);
+  
+  for (int i = 0; i < offlineRecordCount; i++) {
+    offlineBuffer[i].courseId = doc[i]["course_id"].as<String>();
+    offlineBuffer[i].fingerprintId = doc[i]["fingerprint_id"].as<uint32_t>();
+    offlineBuffer[i].timestamp = doc[i]["timestamp"].as<time_t>();
+    offlineBuffer[i].synced = doc[i]["synced"].as<bool>();
+  }
+  
+  Serial.println("Loaded offline attendance records");
+}
+
+/**
+ * Main program loop implementing the state machine
+ */
+void loop() {
+  // Handle button inputs (common across states)
+  handleButtonInputs();
+  
+  // State machine implementation
+  switch (currentState) {
+    case CONNECT_WIFI:
+      handleWiFiConnection();
+      break;
+      
+    case FETCH_COURSES:
+      fetchCourseList();
+      break;
+      
+    case SELECT_COURSE:
+      handleCourseSelection();
+      break;
+      
+    case WAIT_FINGERPRINT:
+      waitForFingerprint();
+      break;
+      
+    case SCAN_FINGERPRINT:
+      scanFingerprint();
+      break;
+      
+    case VERIFY_FINGERPRINT:
+      verifyFingerprint();
+      break;
+      
+    case RECORD_ATTENDANCE:
+      recordAttendance();
+      break;
+      
+    case SHOW_RESULT:
+      showResult();
+      break;
+      
+    case SYNC_OFFLINE:
+      syncOfflineRecords();
+      break;
+      
+    default:
+      // Should never reach here, but just in case
+      currentState = INIT;
+      break;
+  }
+
+  server.handleClient();
+}
+
+void handleStatus() {
+    if (fingerSensor.verifyPassword()) {
+        server.send(200, "application/json", "{\"status\":\"connected\"}");
+    } else {
+        server.send(500, "application/json", "{\"status\":\"sensor error\"}");
     }
-  }
-  
-  digitalWrite(YELLOW_LED, LOW);
-  
-  if (syncCount > 0) {
-    showMessage("Sync complete", String(syncCount) + " records");
-    digitalWrite(GREEN_LED, HIGH);
-    delay(1000);
-    digitalWrite(GREEN_LED, LOW);
-  }
 }
 
-// Display a message on the LCD
-void showMessage(String line1, String line2) {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(line1);
-  
-  if (line2.length() > 0) {
-    lcd.setCursor(0, 1);
-    lcd.print(line2);
-  }
+void handleInit() {
+    if (fingerSensor.verifyPassword()) {
+        server.send(200, "application/json", "{\"success\":true}");
+    } else {
+        server.send(500, "application/json", "{\"success\":false,\"message\":\"Failed to initialize\"}");
+    }
 }
 
-// Blink an LED
-void blinkLED(int pin, int times, int delayMs) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(pin, HIGH);
-    delay(delayMs);
-    digitalWrite(pin, LOW);
-    delay(delayMs);
-  }
+void handleEnroll() {
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"success\":false,\"message\":\"Missing body\"}");
+        return;
+    }
+
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    
+    if (error) {
+        server.send(400, "application/json", "{\"success\":false,\"message\":\"Invalid JSON\"}");
+        return;
+    }
+
+    int id = doc["finger_id"];
+    int result = enrollFinger(id);
+    
+    if (result == 1) {
+        server.send(200, "application/json", "{\"success\":true,\"message\":\"Enrollment successful\"}");
+    } else {
+        String response = "{\"success\":false,\"message\":\"Enrollment failed: " + String(result) + "\"}";
+        server.send(500, "application/json", response);
+    }
+}
+
+void handleVerify() {
+    int result = fingerSensor.getImage();
+    if (result != FINGERPRINT_OK) {
+        server.send(400, "application/json", "{\"success\":false,\"message\":\"Failed to capture finger\"}");
+        return;
+    }
+
+    result = fingerSensor.image2Tz();
+    if (result != FINGERPRINT_OK) {
+        server.send(500, "application/json", "{\"success\":false,\"message\":\"Failed to convert image\"}");
+        return;
+    }
+
+    result = fingerSensor.fingerFastSearch();
+    if (result == FINGERPRINT_OK) {
+        String response = "{\"success\":true,\"finger_id\":" + String(fingerSensor.fingerID) + 
+                         ",\"confidence\":" + String(fingerSensor.confidence) + "}";
+        server.send(200, "application/json", response);
+    } else {
+        server.send(404, "application/json", "{\"success\":false,\"message\":\"No match found\"}");
+    }
+}
+
+void handleDelete() {
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"success\":false,\"message\":\"Missing body\"}");
+        return;
+    }
+
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    
+    if (error) {
+        server.send(400, "application/json", "{\"success\":false,\"message\":\"Invalid JSON\"}");
+        return;
+    }
+
+    int id = doc["finger_id"];
+    if (fingerSensor.deleteModel(id) == FINGERPRINT_OK) {
+        server.send(200, "application/json", "{\"success\":true}");
+    } else {
+        server.send(500, "application/json", "{\"success\":false,\"message\":\"Failed to delete\"}");
+    }
+}
+
+void handleTemplateCount() {
+    fingerSensor.getTemplateCount();
+    String response = "{\"count\":" + String(fingerSensor.templateCount) + "}";
+    server.send(200, "application/json", response);
+}
+
+// Helper function to enroll a new fingerprint
+int enrollFinger(int id) {
+    int p = -1;
+    for (int i = 0; i < 2; i++) {
+        p = fingerSensor.getImage();
+        if (p != FINGERPRINT_OK) return -1;
+
+        p = fingerSensor.image2Tz(i + 1);
+        if (p != FINGERPRINT_OK) return -2;
+
+        if (i == 0) {
+            p = fingerSensor.getImage();
+            if (p != FINGERPRINT_NOFINGER) return -3;
+        }
+    }
+
+    p = fingerSensor.createModel();
+    if (p != FINGERPRINT_OK) return -4;
+
+    p = fingerSensor.storeModel(id);
+    if (p != FINGERPRINT_OK) return -5;
+
+    return 1;
+}
+
+void handleStartEnrollment() {
+    if (enrollmentInProgress) {
+        server.send(400, "application/json", "{\"success\":false,\"message\":\"Enrollment already in progress\"}");
+        return;
+    }
+
+    enrollmentInProgress = true;
+    enrollmentProgress = 0;
+    lastEnrollmentStatus = FINGERPRINT_NOFINGER;
+    
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Enrollment started\"}");
+}
+
+void handleEnrollmentStatus() {
+    if (!enrollmentInProgress) {
+        server.send(200, "application/json", 
+            "{\"status\":\"error\",\"progress\":0,\"message\":\"No enrollment in progress\"}");
+        return;
+    }
+
+    StaticJsonDocument<512> doc;
+    String status;
+    String message;
+
+    if (lastEnrollmentStatus == FINGERPRINT_NOFINGER) {
+        uint8_t p = fingerSensor.getImage();
+        if (p == FINGERPRINT_OK) {
+            lastEnrollmentStatus = p;
+            enrollmentProgress = 25;
+            status = "in_progress";
+            message = "First scan captured";
+        } else {
+            status = "waiting";
+            message = "Place finger on sensor";
+        }
+    }
+    else if (lastEnrollmentStatus == FINGERPRINT_OK && enrollmentProgress == 25) {
+        uint8_t p = fingerSensor.image2Tz(1);
+        if (p == FINGERPRINT_OK) {
+            lastEnrollmentStatus = p;
+            enrollmentProgress = 50;
+            status = "in_progress";
+            message = "Remove finger";
+        } else {
+            status = "error";
+            message = "Failed to process first scan";
+            enrollmentInProgress = false;
+        }
+    }
+    else if (lastEnrollmentStatus == FINGERPRINT_OK && enrollmentProgress == 50) {
+        uint8_t p = fingerSensor.getImage();
+        if (p == FINGERPRINT_NOFINGER) {
+            lastEnrollmentStatus = p;
+            enrollmentProgress = 60;
+            status = "waiting";
+            message = "Place same finger again";
+        }
+    }
+    else if (lastEnrollmentStatus == FINGERPRINT_NOFINGER && enrollmentProgress == 60) {
+        uint8_t p = fingerSensor.getImage();
+        if (p == FINGERPRINT_OK) {
+            lastEnrollmentStatus = p;
+            enrollmentProgress = 75;
+            status = "in_progress";
+            message = "Second scan captured";
+        }
+    }
+    else if (lastEnrollmentStatus == FINGERPRINT_OK && enrollmentProgress == 75) {
+        uint8_t p = fingerSensor.image2Tz(2);
+        if (p == FINGERPRINT_OK) {
+            lastEnrollmentStatus = p;
+            enrollmentProgress = 85;
+            status = "in_progress";
+            message = "Creating model";
+
+            p = fingerSensor.createModel();
+            if (p == FINGERPRINT_OK) {
+                enrollmentProgress = 100;
+                status = "complete";
+                message = "Enrollment complete";
+                enrollmentInProgress = false;
+
+                // Add template data to response
+                JsonObject templateData = doc.createNestedObject("template_data");
+                templateData["size"] = 512;  // Example size
+                templateData["data"] = "base64_encoded_template_here";  // You would need to implement actual template export
+            } else {
+                status = "error";
+                message = "Failed to create model";
+                enrollmentInProgress = false;
+            }
+        } else {
+            status = "error";
+            message = "Failed to process second scan";
+            enrollmentInProgress = false;
+        }
+    }
+
+    doc["status"] = status;
+    doc["progress"] = enrollmentProgress;
+    doc["message"] = message;
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
 }

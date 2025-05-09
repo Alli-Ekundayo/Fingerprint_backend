@@ -2,22 +2,32 @@ import os
 import logging
 
 from flask import Flask
+from flask_wtf.csrf import CSRFProtect
 from werkzeug.middleware.proxy_fix import ProxyFix
 from extensions import db, login_manager
 from dotenv import load_dotenv, find_dotenv
-from flask_wtf.csrf import CSRFProtect
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
- 
+
+# Load environment variables
+load_dotenv(find_dotenv())
+
 # Create the app
 app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+# Initialize CSRF protection
 csrf = CSRFProtect(app)
 
 # Configure PostgreSQL database
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
+default_db_uri = 'sqlite:///fingerprint_tracker.db'
+database_url = os.environ.get("DATABASE_URL", default_db_uri)
+logger.info(f"Using database URI: {database_url}")
+
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "pool_recycle": 300,
     "pool_pre_ping": True,

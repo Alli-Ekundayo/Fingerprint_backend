@@ -1,74 +1,140 @@
 import unittest
 from unittest.mock import patch, MagicMock
-from fingerprint_sensor_module import FingerprintSensor
+from flask import url_for
+from app import create_app, db
+from models import Student, Fingerprint, Course
+from datetime import datetime
 
-class TestFingerprintSensor(unittest.TestCase):
+class TestFingerprintRoutes(unittest.TestCase):
+    def setUp(self):
+        self.app = create_app('testing')
+        self.client = self.app.test_client()
+        self.app_context = self.app.app_context()
+        self.app_context.push()
+        db.create_all()
+        
+        # Create test data
+        self.student = Student(
+            student_id="TEST001",
+            first_name="Test",
+            last_name="Student",
+            email="test@example.com"
+        )
+        db.session.add(self.student)
+        
+        self.course = Course(
+            course_code="TEST101",
+            title="Test Course",
+            description="Test Description"
+        )
+        db.session.add(self.course)
+        db.session.commit()
 
-    @patch('serial.Serial')
-    def test_initialization_success(self, mock_serial):
-        # Mock the serial connection
-        mock_serial_instance = MagicMock()
-        mock_serial.return_value = mock_serial_instance
-        mock_serial_instance.readline.return_value = b'OK\n'
+    def tearDown(self):
+        db.session.remove()
+        db.drop_all()
+        self.app_context.pop()
 
-        sensor = FingerprintSensor(port='COM3', baudrate=115200)
-        self.assertTrue(sensor.initialized)
+    @patch('fingerprint_sensor_module.FingerPrintSensor.connect')
+    @patch('fingerprint_sensor_module.FingerPrintSensor.verify_finger')
+    def test_verify_fingerprint(self, mock_verify, mock_connect):
+        # Mock successful connection
+        mock_connect.return_value = True
+        
+        # Mock successful verification
+        mock_verify.return_value = {
+            'success': True,
+            'finger_id': 1,
+            'confidence': 100
+        }
+        
+        # Create a test fingerprint record
+        fingerprint = Fingerprint(
+            student_id=self.student.id,
+            finger_id=1,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(fingerprint)
+        db.session.commit()
+        
+        # Test verification endpoint
+        response = self.client.post('/scan/verify', data={
+            'course_id': self.course.id
+        })
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['status'], 'success')
+        self.assertIn(self.student.first_name, data['message'])
 
-    @patch('serial.Serial')
-    def test_initialization_failure(self, mock_serial):
-        # Mock the serial connection
-        mock_serial_instance = MagicMock()
-        mock_serial.return_value = mock_serial_instance
-        mock_serial_instance.readline.return_value = b'ERROR\n'
+    @patch('fingerprint_sensor_module.FingerPrintSensor.connect')
+    @patch('fingerprint_sensor_module.FingerPrintSensor.enroll_finger')
+    def test_enrollment_process(self, mock_enroll, mock_connect):
+        # Mock successful connection
+        mock_connect.return_value = True
+        
+        # Mock successful enrollment
+        mock_enroll.return_value = {
+            'success': True,
+            'message': 'Enrollment successful'
+        }
+        
+        with self.client.session_transaction() as session:
+            session['enrollment_student_id'] = self.student.id
+            session['enrollment_finger_id'] = 1
+        
+        # Test enrollment process endpoint
+        response = self.client.post('/enroll/process')
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['status'], 'success')
+        self.assertIn(self.student.first_name, data['message'])
+        
+        # Verify fingerprint was stored in database
+        fingerprint = Fingerprint.query.filter_by(
+            student_id=self.student.id,
+            finger_id=1
+        ).first()
+        self.assertIsNotNone(fingerprint)
 
-        sensor = FingerprintSensor(port='COM3', baudrate=115200)
-        self.assertFalse(sensor.initialized)
+    @patch('fingerprint_sensor_module.FingerPrintSensor.connect')
+    @patch('fingerprint_sensor_module.FingerPrintSensor.verify_finger')
+    def test_verify_fingerprint_not_enrolled(self, mock_verify, mock_connect):
+        # Mock successful connection
+        mock_connect.return_value = True
+        
+        # Mock successful verification but with unregistered finger_id
+        mock_verify.return_value = {
+            'success': True,
+            'finger_id': 999,
+            'confidence': 100
+        }
+        
+        # Test verification endpoint
+        response = self.client.post('/scan/verify', data={
+            'course_id': self.course.id
+        })
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['status'], 'error')
+        self.assertIn('not enrolled', data['message'])
 
-    @patch('serial.Serial')
-    def test_start_enrollment_success(self, mock_serial):
-        # Mock the serial connection
-        mock_serial_instance = MagicMock()
-        mock_serial.return_value = mock_serial_instance
-        mock_serial_instance.readline.side_effect = [b'OK\n', b'ENROLLMENT_STARTED\n']
-
-        sensor = FingerprintSensor(port='COM3', baudrate=115200)
-        result = sensor.start_enrollment()
-        self.assertTrue(result)
-        self.assertTrue(sensor.enrolling)
-
-    @patch('serial.Serial')
-    def test_start_enrollment_failure(self, mock_serial):
-        # Mock the serial connection
-        mock_serial_instance = MagicMock()
-        mock_serial.return_value = mock_serial_instance
-        mock_serial_instance.readline.side_effect = [b'OK\n', b'ERROR\n']
-
-        sensor = FingerprintSensor(port='COM3', baudrate=115200)
-        result = sensor.start_enrollment()
-        self.assertFalse(result)
-        self.assertFalse(sensor.enrolling)
-
-    @patch('serial.Serial')
-    def test_verify_fingerprint_success(self, mock_serial):
-        # Mock the serial connection
-        mock_serial_instance = MagicMock()
-        mock_serial.return_value = mock_serial_instance
-        mock_serial_instance.readline.side_effect = [b'OK\n', b'{"status": "success", "message": "Fingerprint verified"}\n']
-
-        sensor = FingerprintSensor(port='COM3', baudrate=115200)
-        result = sensor.verify_fingerprint()
-        self.assertEqual(result['status'], 'success')
-
-    @patch('serial.Serial')
-    def test_verify_fingerprint_failure(self, mock_serial):
-        # Mock the serial connection
-        mock_serial_instance = MagicMock()
-        mock_serial.return_value = mock_serial_instance
-        mock_serial_instance.readline.side_effect = [b'OK\n', b'{"status": "error", "message": "Fingerprint not recognized"}\n']
-
-        sensor = FingerprintSensor(port='COM3', baudrate=115200)
-        result = sensor.verify_fingerprint()
-        self.assertEqual(result['status'], 'error')
+    @patch('fingerprint_sensor_module.FingerPrintSensor.connect')
+    def test_verify_fingerprint_connection_failed(self, mock_connect):
+        # Mock failed connection
+        mock_connect.return_value = False
+        
+        # Test verification endpoint
+        response = self.client.post('/scan/verify', data={
+            'course_id': self.course.id
+        })
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['status'], 'error')
+        self.assertIn('Failed to connect', data['message'])
 
 if __name__ == '__main__':
     unittest.main()

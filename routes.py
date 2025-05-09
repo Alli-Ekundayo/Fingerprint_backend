@@ -3,19 +3,19 @@ from datetime import datetime, timedelta
 from flask import render_template, redirect, url_for, flash, request, jsonify, session
 from flask_login import login_user, logout_user, login_required, current_user
 from urllib.parse import urlparse
-from app import db, csrf
+from app import db
 from models import User, Student, Course, Attendance, Fingerprint
 from forms import (
     LoginForm, RegistrationForm, StudentForm, CourseForm, EnrollmentForm, 
     FingerprintEnrollForm, AttendanceForm, SearchForm
 )
-from fingerprint_sensor_module import FingerprintSensor
+from fingerprint_sensor_module import FingerPrintSensor
 from attendance_manager import AttendanceManager
 
 logger = logging.getLogger(__name__)
 
-# Initialize fingerprint sensor
-fingerprint_sensor = FingerprintSensor()
+# Initialize fingerprint sensor with ESP32 IP address
+fingerprint_sensor = FingerPrintSensor("192.168.43.215")  # Replace with your ESP32's IP
 attendance_manager = AttendanceManager()
 
 def register_routes(app):
@@ -53,29 +53,6 @@ def register_routes(app):
             
         return render_template('login.html', title='Sign In', form=form)
     
-    @csrf.exempt
-    @app.route('/api/login', methods=['GET', 'POST'])
-    def api_login():
-        if current_user.is_authenticated:
-            return jsonify({"message": "Already logged in"}), 200
-
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Missing JSON payload"}), 400
-
-        username = data.get("username")
-        password = data.get("password")
-
-        if not username or not password:
-            return jsonify({"error": "Missing credentials"}), 400
-
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({"error": "Invalid credentials"}), 401
-
-        login_user(user)
-        return jsonify({"message": "Login successful"}), 200
-
     @app.route('/logout')
     def logout():
         """User logout route"""
@@ -234,7 +211,7 @@ def register_routes(app):
             
         return render_template('students.html', title='Edit Student', form=form, student=student)
     
-    @csrf.exempt
+
     @app.route('/students/delete/<int:id>', methods=['POST'])
     @login_required
     def delete_student(id):
@@ -380,8 +357,7 @@ def register_routes(app):
         
         return render_template('course_attendance.html', title=f'Attendance - {course.course_code}',
                               course=course, grouped_records=grouped_records)
-     
-    @csrf.exempt                         
+                            
     @app.route('/courses/delete/<int:id>', methods=['POST'])
     @login_required
     def delete_course(id):
@@ -422,39 +398,18 @@ def register_routes(app):
         
         if form.validate_on_submit():
             student = Student.query.get(form.student.data)
-            finger_id = form.finger_id.data
             
-            # Start the enrollment process
-            session['enrollment_student_id'] = student.id
-            session['enrollment_finger_id'] = finger_id
-            
-            flash(f'Place {student.first_name}\'s finger on the sensor to begin enrollment...', 'info')
-            
-            # In a real system, this would trigger the fingerprint sensor to start enrollment
-            fingerprint_sensor.start_enrollment()
-            
-            return render_template('enroll.html', title='Fingerprint Enrollment', 
-                                  form=form, enrolling=True, student=student)
-        
-        return render_template('enroll.html', title='Fingerprint Enrollment', form=form)
-    
-    @app.route('/enroll/status', methods=['GET'])
-    @login_required
-    def enrollment_status():
-        """AJAX endpoint to check enrollment status"""
-        if 'enrollment_student_id' not in session:
-            return jsonify({'status': 'error', 'message': 'No enrollment in progress'})
-        
-        # Check with the fingerprint sensor for status
-        status = fingerprint_sensor.get_enrollment_status()
-        
-        if status['status'] == 'complete':
-            # If enrollment is complete, save the fingerprint
-            student_id = session.pop('enrollment_student_id', None)
-            finger_id = session.pop('enrollment_finger_id', None)
-            
-            if student_id and finger_id is not None:
-                student = Student.query.get(student_id)
+            # Get next available ID from ESP32
+            try:
+                response = fingerprint_sensor.get_next_fingerprint_id()
+                if not response.get('success'):
+                    flash('Failed to get next available fingerprint ID. Please try again.', 'error')
+                    return redirect(url_for('enroll'))
+                
+                finger_id = response.get('nextId')
+                if not finger_id:
+                    flash('Fingerprint sensor memory is full. Please delete some fingerprints first.', 'error')
+                    return redirect(url_for('enroll'))
                 
                 # Check if this finger is already enrolled
                 existing = Fingerprint.query.filter_by(
@@ -463,20 +418,129 @@ def register_routes(app):
                 ).first()
                 
                 if existing:
-                    # Update existing fingerprint
-                    existing.template_data = status['data']
-                    db.session.commit()
-                else:
+                    flash(f'This finger is already enrolled for {student.first_name}. Please choose a different finger.', 'warning')
+                    return redirect(url_for('enroll'))
+                
+                # Store enrollment info in session
+                session['enrollment_student_id'] = student.id
+                session['enrollment_finger_id'] = finger_id
+            except Exception as e:
+                logger.error(f"Error getting next fingerprint ID: {str(e)}")
+                flash('Failed to communicate with fingerprint sensor. Please check the connection.', 'error')
+                return redirect(url_for('enroll'))
+            
+            # Start enrollment on ESP32
+            try:
+                response = fingerprint_sensor.start_enrollment()
+                if not response:
+                    flash('Failed to start enrollment process. Please try again.', 'error')
+                    return redirect(url_for('enroll'))
+                    
+                flash(f'Place {student.first_name}\'s finger on the sensor to begin enrollment...', 'info')
+                return render_template('enroll.html', title='Fingerprint Enrollment', 
+                                     form=form, enrolling=True, student=student)
+                                     
+            except Exception as e:
+                logger.error(f"Error starting enrollment: {str(e)}")
+                flash('Failed to communicate with fingerprint sensor. Please check the connection.', 'error')
+                return redirect(url_for('enroll'))
+        
+        return render_template('enroll.html', title='Fingerprint Enrollment', form=form)
+
+    @app.route('/enroll/status', methods=['GET'])
+    @login_required
+    def enrollment_status():
+        """AJAX endpoint to check enrollment status"""
+        if 'enrollment_student_id' not in session:
+            return jsonify({'status': 'error', 'message': 'No enrollment in progress'})
+        
+        try:
+            # Get status from ESP32
+            status = fingerprint_sensor.get_enrollment_status()
+            
+            # If enrollment is complete, save the fingerprint template
+            if status['status'] == 'complete' and 'template_data' in status:
+                student_id = session.pop('enrollment_student_id', None)
+                finger_id = session.pop('enrollment_finger_id', None)
+                
+                if student_id and finger_id is not None:
+                    student = Student.query.get(student_id)
+                    
                     # Create new fingerprint record
                     fingerprint = Fingerprint(
                         student_id=student.id,
                         finger_id=finger_id,
-                        template_data=status['data']
+                        template_data=status['template_data'],
+                        created_at=datetime.utcnow()
                     )
-                    db.session.add(fingerprint)
-                    db.session.commit()
-        
-        return jsonify(status)
+                    
+                    try:
+                        db.session.add(fingerprint)
+                        db.session.commit()
+                        logger.info(f"Fingerprint enrolled for student {student.id}, finger {finger_id}")
+                    except Exception as e:
+                        logger.error(f"Database error saving fingerprint: {str(e)}")
+                        db.session.rollback()
+                        return jsonify({
+                            'status': 'error',
+                            'message': 'Failed to save fingerprint to database'
+                        })
+            
+            return jsonify(status)
+            
+        except Exception as e:
+            logger.error(f"Error checking enrollment status: {str(e)}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to communicate with fingerprint sensor'
+            })
+
+    @app.route('/enroll/process', methods=['POST'])
+    @login_required
+    def process_enrollment():
+        """AJAX endpoint to process fingerprint enrollment"""
+        if 'enrollment_student_id' not in session:
+            return jsonify({'status': 'error', 'message': 'No enrollment in progress'})
+
+        try:
+            student_id = session['enrollment_student_id']
+            finger_id = session['enrollment_finger_id']
+
+            # Start enrollment process on ESP32
+            result = fingerprint_sensor.enroll_finger(finger_id)
+            
+            if result.get('success'):
+                # Create new fingerprint record in database
+                fingerprint = Fingerprint(
+                    student_id=student_id,
+                    finger_id=finger_id,
+                    created_at=datetime.utcnow()
+                )
+                
+                db.session.add(fingerprint)
+                db.session.commit()
+
+                # Clear enrollment session data
+                session.pop('enrollment_student_id', None)
+                session.pop('enrollment_finger_id', None)
+
+                student = Student.query.get(student_id)
+                return jsonify({
+                    'status': 'success',
+                    'message': f'Successfully enrolled fingerprint for {student.first_name} {student.last_name}'
+                })
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': result.get('message', 'Enrollment failed')
+                })
+
+        except Exception as e:
+            logger.error(f"Error during enrollment: {str(e)}")
+            return jsonify({
+                'status': 'error',
+                'message': f'Enrollment error: {str(e)}'
+            })
     
     @app.route('/attendance', methods=['GET', 'POST'])
     @login_required
@@ -534,28 +598,59 @@ def register_routes(app):
         if not course_id:
             return jsonify({'status': 'error', 'message': 'Course is required'})
         
-        # In a real system, this would trigger the fingerprint sensor to scan
-        # and compare against stored templates
-        result = fingerprint_sensor.verify_fingerprint()
-        
-        if result['status'] == 'match':
-            # Record attendance for the matched student
-            attendance = attendance_manager.record_attendance(
-                student_id=result['student_id'],
-                course_id=int(course_id),
-                status='present'
-            )
+        try:
+            # Attempt to connect to the sensor if not already connected
+            if not fingerprint_sensor.is_connected:
+                if not fingerprint_sensor.connect():
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Failed to connect to fingerprint sensor'
+                    })
+
+            # Verify fingerprint using ESP32
+            result = fingerprint_sensor.verify_finger()
             
-            if attendance:
-                student = Student.query.get(result['student_id'])
-                return jsonify({
-                    'status': 'success', 
-                    'message': f'Attendance recorded for {student.first_name} {student.last_name}'
-                })
+            if result.get('success'):
+                finger_id = result.get('finger_id')
+                # Look up the student by their enrolled fingerprint
+                fingerprint = Fingerprint.query.filter_by(finger_id=finger_id).first()
+                
+                if not fingerprint:
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Fingerprint found but not enrolled in system'
+                    })
+
+                # Record attendance for the matched student
+                attendance = attendance_manager.record_attendance(
+                    student_id=fingerprint.student_id,
+                    course_id=int(course_id),
+                    status='present'
+                )
+                
+                if attendance:
+                    student = Student.query.get(fingerprint.student_id)
+                    return jsonify({
+                        'status': 'success', 
+                        'message': f'Attendance recorded for {student.first_name} {student.last_name}'
+                    })
+                else:
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Failed to record attendance in database'
+                    })
             else:
-                return jsonify({'status': 'error', 'message': 'Failed to record attendance'})
-        else:
-            return jsonify({'status': 'error', 'message': result['message']})
+                return jsonify({
+                    'status': 'error',
+                    'message': result.get('message', 'No match found')
+                })
+                
+        except Exception as e:
+            logger.error(f"Error during fingerprint verification: {str(e)}")
+            return jsonify({
+                'status': 'error',
+                'message': f'Verification error: {str(e)}'
+            })
     
     @app.route('/sync', methods=['GET'])
     @login_required
@@ -571,3 +666,66 @@ def register_routes(app):
             flash(f'Sync failed: {result["message"]}', 'danger')
             
         return redirect(url_for('attendance'))
+
+    @app.route('/api/enrollment/available', methods=['GET'])
+    @login_required
+    def get_unenrolled_students():
+        """Get list of students who don't have fingerprints enrolled"""
+        try:
+            # Query for students without fingerprint records
+            unenrolled_students = Student.query\
+                .outerjoin(Fingerprint)\
+                .filter(Fingerprint.id.is_(None))\
+                .all()
+            
+            students_data = []
+            for student in unenrolled_students:
+                students_data.append({
+                    'id': student.id,
+                    'student_id': student.student_id,
+                    'first_name': student.first_name,
+                    'last_name': student.last_name
+                })
+            
+            return jsonify(students_data), 200
+            
+        except Exception as e:
+            logger.error(f"Error fetching unenrolled students: {str(e)}")
+            return jsonify({'error': 'Failed to fetch unenrolled students'}), 500
+
+    @app.route('/api/enrollment/save', methods=['POST'])
+    @login_required
+    def save_enrollment():
+        """Save a new fingerprint enrollment"""
+        try:
+            data = request.get_json()
+            
+            if not data or 'student_id' not in data or 'fingerprint_id' not in data:
+                return jsonify({'error': 'Missing required data'}), 400
+                
+            student = Student.query.get(data['student_id'])
+            if not student:
+                return jsonify({'error': 'Student not found'}), 404
+                
+            # Check if fingerprint ID is already in use
+            existing_print = Fingerprint.query.filter_by(fingerprint_id=data['fingerprint_id']).first()
+            if existing_print:
+                return jsonify({'error': 'Fingerprint ID already in use'}), 409
+                
+            # Create new fingerprint record
+            new_fingerprint = Fingerprint(
+                student_id=student.id,
+                fingerprint_id=data['fingerprint_id'],
+                enrolled_at=datetime.utcnow()
+            )
+            
+            db.session.add(new_fingerprint)
+            db.session.commit()
+            
+            logger.info(f"Fingerprint enrolled for student {student.id} with ID {data['fingerprint_id']}")
+            return jsonify({'message': 'Enrollment saved successfully'}), 200
+            
+        except Exception as e:
+            logger.error(f"Error saving enrollment: {str(e)}")
+            db.session.rollback()
+            return jsonify({'error': 'Failed to save enrollment'}), 500
